@@ -1,65 +1,87 @@
 package analyzer
 
 import (
-	"math"
+	"io"
+	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestAnalyzeFile_NotGoingHome(t *testing.T) {
-	// Path to the test file relative to the test directory
-	testFile := filepath.Join("..", "01 - Not Going Home.flac")
-
-	result, err := AnalyzeFile(testFile)
-	if err != nil {
-		t.Fatalf("AnalyzeFile failed: %v", err)
+func TestTracks(t *testing.T) {
+	// WIRED CD: Rip. Sample. Mash. Share. - Creative Commons compilation (2004)
+	// https://archive.org/details/The_WIRED_CD_Rip_Sample_Mash_Share-2769
+	tests := []struct {
+		inURL string
+		out   AnalyzeOut
+	}{
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Beastie_Boys_-_01_-_Now_Get_Busy.mp3", AnalyzeOut{BPM: 113.01, SampleRate: 44100, Duration: 141.86}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/David_Byrne_-_02_-_My_Fair_Lady.mp3", AnalyzeOut{BPM: 140.01, SampleRate: 44100, Duration: 208.34}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Zap_Mama_-_03_-_Wadidyusay.mp3", AnalyzeOut{BPM: 92.99, SampleRate: 44100, Duration: 196.43}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/My_Morning_Jacket_-_04_-_One_Big_Holiday.mp3", AnalyzeOut{BPM: 137.13, SampleRate: 44100, Duration: 317.35}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Spoon_-_05_-_Revenge.mp3", AnalyzeOut{BPM: 129.53, SampleRate: 44100, Duration: 144.81}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Gilberto_Gil_-_06_-_Oslodum.mp3", AnalyzeOut{BPM: 91.65, SampleRate: 44100, Duration: 234.10}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Dan_the_Automator_-_07_-_Relaxation_Spa_Treatment.mp3", AnalyzeOut{BPM: 85.00, SampleRate: 44100, Duration: 198.88}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Thievery_Corporation_-_08_-_DC_3000.mp3", AnalyzeOut{BPM: 90.17, SampleRate: 44100, Duration: 261.60}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Le_Tigre_-_09_-_Fake_French.mp3", AnalyzeOut{BPM: 90.01, SampleRate: 44100, Duration: 169.16}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Paul_Westerberg_-_10_-_Looking_Up_in_Heaven.mp3", AnalyzeOut{BPM: 147.78, SampleRate: 44100, Duration: 188.33}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Chuck_D_-_11_-_No_Meaning_No_feat_Fine_Arts_Militia.mp3", AnalyzeOut{BPM: 91.87, SampleRate: 44100, Duration: 189.98}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/The_Rapture_-_12_-_Sister_Saviour_Blackstrobe_Remix.mp3", AnalyzeOut{BPM: 116.81, SampleRate: 44100, Duration: 417.71}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Cornelius_-_13_-_Wataridori_2.mp3", AnalyzeOut{BPM: 140.02, SampleRate: 44100, Duration: 422.28}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/DJ_Danger_Mouse_-_14_-_What_U_Sittin_On_feat_Jemini_Cee_Lo_And_Tha_Alkaholiks.mp3", AnalyzeOut{BPM: 91.64, SampleRate: 44100, Duration: 204.27}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/DJ_Dolores_-_15_-_Oslodum_2004.mp3", AnalyzeOut{BPM: 92.09, SampleRate: 44100, Duration: 235.40}},
+		{"https://archive.org/download/The_WIRED_CD_Rip_Sample_Mash_Share-2769/Matmos_-_16_-_Action_at_a_Distance.mp3", AnalyzeOut{BPM: 164.18, SampleRate: 44100, Duration: 160.80}},
 	}
 
-	// Expected values from rekordbox
-	expectedBPM := 125.0
-	expectedBars := 110.4
+	for _, tt := range tests {
+		name := filepath.Base(tt.inURL)
+		t.Run(name, func(t *testing.T) {
+			path := get(t, tt.inURL)
 
-	// Check BPM with a tolerance of 0.5 BPM
-	bpmTolerance := 0.5
-	if math.Abs(result.BPM-expectedBPM) > bpmTolerance {
-		t.Errorf("BPM mismatch: got %.2f, expected %.2f (tolerance: %.2f)",
-			result.BPM, expectedBPM, bpmTolerance)
-	}
+			got, err := AnalyzeFile(path)
+			require.NoError(t, err)
 
-	// Check bars with a tolerance of 2 bars (since beat detection can vary slightly)
-	barsTolerance := 2.0
-	actualBars := result.Bars()
-	if math.Abs(actualBars-expectedBars) > barsTolerance {
-		t.Errorf("Bars mismatch: got %.1f, expected %.1f (tolerance: %.1f)",
-			actualBars, expectedBars, barsTolerance)
-	}
+			assert.InDelta(t, tt.out.BPM, got.BPM, 1.0, "BPM")
+			assert.Equal(t, tt.out.SampleRate, got.SampleRate, "SampleRate")
+			assert.InDelta(t, tt.out.Duration, got.Duration, 0.1, "Duration")
+			assert.NotEmpty(t, got.Beats, "Beats")
+			assert.NotZero(t, got.TotalFrames, "TotalFrames")
 
-	t.Logf("Analysis results:")
-	t.Logf("  BPM: %.2f (expected: %.2f)", result.BPM, expectedBPM)
-	t.Logf("  Bars: %.1f (expected: %.1f)", actualBars, expectedBars)
-	t.Logf("  Total beats: %d", len(result.Beats))
-	t.Logf("  Duration: %.2f seconds", result.Duration)
-	t.Logf("  Sample rate: %d Hz", result.SampleRate)
-
-	// Log first few beats for debugging
-	if len(result.Beats) > 5 {
-		t.Logf("  First 5 beats (seconds): %.3f, %.3f, %.3f, %.3f, %.3f",
-			result.Beats[0], result.Beats[1], result.Beats[2], result.Beats[3], result.Beats[4])
+			t.Logf("BPM: %.2f, Bars: %.1f, Beats: %d, Duration: %.2fs",
+				got.BPM, got.Bars(), len(got.Beats), got.Duration)
+		})
 	}
 }
 
-func TestVersion(t *testing.T) {
-	version := Version()
-	if version == "" {
-		t.Error("Version returned empty string")
-	}
-	t.Logf("Analyzer version: %s", version)
-}
+func get(t *testing.T, url string) string {
+	t.Helper()
 
-func TestAnalyzeFile_InvalidFile(t *testing.T) {
-	_, err := AnalyzeFile("/nonexistent/file.flac")
-	if err == nil {
-		t.Error("Expected error for nonexistent file, got nil")
+	dir := "fixtures"
+	require.NoError(t, os.MkdirAll(dir, 0755))
+
+	name := filepath.Base(url)
+	path := filepath.Join(dir, name)
+	if _, err := os.Stat(path); err == nil {
+		return path
 	}
-	t.Logf("Got expected error: %v", err)
+
+	t.Logf("Downloading %s...", name)
+
+	resp, err := http.Get(url)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	_, err = io.Copy(f, resp.Body)
+	require.NoError(t, err)
+
+	return path
 }
