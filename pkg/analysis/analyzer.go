@@ -1,6 +1,6 @@
 // Package analyzer provides Go bindings for Mixxx beat detection.
 // It wraps the qm-dsp library (Queen Mary DSP) for BPM and beat grid analysis.
-package analyzer
+package analysis
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/lib

@@ -1,6 +1,8 @@
+//go:build tensorflow
+
 // Package analyzer provides Go bindings for beat detection.
 // This file provides ML-based beat detection using TensorFlow Go bindings.
-package analyzer
+package analysis
 
 import (
 	"fmt"

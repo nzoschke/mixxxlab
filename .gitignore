@@ -1,2 +1,4 @@
-analyzer/lib/build
-analyzer/fixtures
+pkg/analysis/fixtures
+pkg/analysis/lib/build
+music/
+/app

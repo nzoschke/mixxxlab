@@ -1,4 +1,6 @@
-package analyzer
+//go:build tensorflow
+
+package analysis
 
 import (
 	"os"

@@ -1,0 +1,34 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --text-primary: #eee;
+  --text-secondary: #aaa;
+  --accent: #e94560;
+  --accent-dim: #7a2332;
+  --beat-1: #e94560;
+  --beat-2: #f39c12;
+  --beat-3: #2ecc71;
+  --beat-4: #3498db;
+  --waveform-bg: #0a0a1a;
+  --waveform-peak: #3498db;
+  --waveform-played: #e94560;
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+mixx-app {
+  display: block;
+  height: 100%;
+}

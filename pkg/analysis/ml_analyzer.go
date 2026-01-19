@@ -1,6 +1,6 @@
 // Package analyzer provides Go bindings for beat detection.
 // This file provides ML-based beat detection using a Python subprocess.
-package analyzer
+package analysis
 
 import (
 	"encoding/json"
@@ -40,7 +40,8 @@ func NewMLAnalyzer() (*MLAnalyzer, error) {
 	if !ok {
 		return nil, fmt.Errorf("failed to get current file path")
 	}
-	baseDir := filepath.Dir(filepath.Dir(currentFile))
+	// Go up from pkg/analysis to project root
+	baseDir := filepath.Dir(filepath.Dir(filepath.Dir(currentFile)))
 
 	// Construct paths
 	scriptPath := filepath.Join(baseDir, "beat_detector.py")

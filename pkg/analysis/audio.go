@@ -1,6 +1,6 @@
 // Package analyzer provides Go bindings for beat detection.
 // This file provides audio file loading and processing utilities.
-package analyzer
+package analysis
 
 import (
 	"encoding/binary"
