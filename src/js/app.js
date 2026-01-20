@@ -18,20 +18,25 @@ class MixxApp extends LitElement {
 
   static styles = css`
     :host {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-areas:
+        "header header"
+        "sidebar main";
+      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-columns: 300px 1fr;
       height: 100%;
+      overflow: hidden;
       background: var(--bg-primary);
     }
 
     header {
+      grid-area: header;
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 0.75rem 1rem;
       background: var(--bg-secondary);
       border-bottom: 1px solid var(--bg-tertiary);
-      flex-shrink: 0;
     }
 
     h1 {
@@ -40,17 +45,12 @@ class MixxApp extends LitElement {
       margin: 0;
     }
 
-    .content {
-      display: flex;
-      flex: 1;
-      overflow: hidden;
-    }
-
     .sidebar {
-      width: 300px;
+      grid-area: sidebar;
+      min-height: 0;
+      overflow-y: auto;
       background: var(--bg-secondary);
       border-right: 1px solid var(--bg-tertiary);
-      overflow-y: auto;
     }
 
     .track-list {
@@ -90,13 +90,12 @@ class MixxApp extends LitElement {
     }
 
     .main {
-      flex: 1;
+      grid-area: main;
       display: flex;
       flex-direction: column;
       padding: 0.75rem;
       gap: 0.75rem;
       overflow: hidden;
-      min-height: 0;
     }
 
     .visualizer-row {
@@ -321,26 +320,24 @@ class MixxApp extends LitElement {
           </div>
         ` : ''}
       </header>
-      <div class="content">
-        <aside class="sidebar">
-          <ul class="track-list">
-            ${this.tracks.map(track => html`
-              <li
-                class="track-item ${track === this.currentTrack ? 'active' : ''} ${!track.has_json ? 'no-analysis' : ''}"
-                @click=${() => this.selectTrack(track)}
-              >
-                <div class="track-name">${track.name}</div>
-                <div class="track-status">
-                  ${track.has_json ? 'Analyzed' : 'No analysis'}
-                </div>
-              </li>
-            `)}
-          </ul>
-        </aside>
-        <main class="main">
-          ${this.currentTrack ? this.renderPlayer() : this.renderEmptyState()}
-        </main>
-      </div>
+      <aside class="sidebar">
+        <ul class="track-list">
+          ${this.tracks.map(track => html`
+            <li
+              class="track-item ${track === this.currentTrack ? 'active' : ''} ${!track.has_json ? 'no-analysis' : ''}"
+              @click=${() => this.selectTrack(track)}
+            >
+              <div class="track-name">${track.name}</div>
+              <div class="track-status">
+                ${track.has_json ? 'Analyzed' : 'No analysis'}
+              </div>
+            </li>
+          `)}
+        </ul>
+      </aside>
+      <main class="main">
+        ${this.currentTrack ? this.renderPlayer() : this.renderEmptyState()}
+      </main>
     `;
   }
 
