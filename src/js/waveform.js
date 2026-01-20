@@ -4,6 +4,7 @@ class MixxWaveform extends LitElement {
   static properties = {
     beats: { type: Array },
     cuePoints: { type: Array },
+    phrases: { type: Array },
     duration: { type: Number },
     currentTime: { type: Number },
     waveform: { type: Object },
@@ -32,6 +33,7 @@ class MixxWaveform extends LitElement {
     super();
     this.beats = [];
     this.cuePoints = [];
+    this.phrases = [];
     this.duration = 0;
     this.currentTime = 0;
     this.waveform = null;
@@ -60,6 +62,20 @@ class MixxWaveform extends LitElement {
     phrase: '#ff6600',     // Orange-red
     section: '#ffff00',    // Yellow
     energy: '#ff0066',     // Hot pink
+  };
+
+  // Phrase/section colors (for SongFormer music structure)
+  static PHRASE_COLORS = {
+    intro: '#4CAF50',        // Green
+    verse: '#2196F3',        // Blue
+    chorus: '#FF9800',       // Orange
+    bridge: '#9C27B0',       // Purple
+    instrumental: '#607D8B', // Blue Grey
+    outro: '#795548',        // Brown
+    silence: '#37474F',      // Dark Grey
+    'pre-chorus': '#E91E63', // Pink
+    buildup: '#E91E63',      // Pink
+    breakdown: '#00BCD4',    // Cyan
   };
 
   connectedCallback() {
@@ -94,7 +110,7 @@ class MixxWaveform extends LitElement {
   }
 
   updated(changed) {
-    if (changed.has('beats') || changed.has('cuePoints') || changed.has('duration') || changed.has('waveform') || changed.has('zoom')) {
+    if (changed.has('beats') || changed.has('cuePoints') || changed.has('phrases') || changed.has('duration') || changed.has('waveform') || changed.has('zoom')) {
       this.draw();
     }
   }
@@ -158,6 +174,31 @@ class MixxWaveform extends LitElement {
 
     const viewport = this.getViewport();
 
+    // Draw phrase regions (background only - labels drawn later on top)
+    if (this.phrases && this.phrases.length > 0) {
+      this.phrases.forEach((phrase) => {
+        const phraseEnd = phrase.time + (phrase.duration || 0);
+
+        // Skip phrases outside viewport
+        if (phraseEnd < viewport.start || phrase.time > viewport.end) return;
+
+        const startX = this.timeToX(Math.max(phrase.time, viewport.start), width);
+        const endX = this.timeToX(Math.min(phraseEnd, viewport.end), width);
+        const phraseWidth = endX - startX;
+
+        if (phraseWidth < 1) return;
+
+        const color = MixxWaveform.PHRASE_COLORS[phrase.label] || '#666666';
+
+        // Draw background region with transparency
+        this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 0.15;
+        this.ctx.fillRect(startX, 0, phraseWidth, height);
+
+        this.ctx.globalAlpha = 1;
+      });
+    }
+
     // Draw waveform if available
     if (this.waveform?.peaks && this.waveform?.troughs) {
       const { peaks, troughs, pixels_per_sec } = this.waveform;
@@ -199,25 +240,21 @@ class MixxWaveform extends LitElement {
       // At low zoom: only every 4 bars (16 beats)
       // At medium zoom: every bar (4 beats)
       // At high zoom: every beat
+      // Bar numbers always shown on downbeats
       let beatInterval = 1;
-      let showBarNumbers = true;
 
       if (beatsPerPixel > 0.3) {
         // Very zoomed out: show every 4 bars
         beatInterval = 16;
-        showBarNumbers = true;
       } else if (beatsPerPixel > 0.1) {
         // Zoomed out: show every bar (downbeats only)
         beatInterval = 4;
-        showBarNumbers = true;
       } else if (beatsPerPixel > 0.05) {
-        // Medium zoom: show downbeats, no numbers
+        // Medium zoom: show downbeats
         beatInterval = 4;
-        showBarNumbers = false;
       } else if (beatsPerPixel > 0.02) {
         // More zoomed: show every 2 beats
         beatInterval = 2;
-        showBarNumbers = false;
       }
       // else: show all beats
 
@@ -247,23 +284,21 @@ class MixxWaveform extends LitElement {
           this.ctx.lineTo(x, height);
           this.ctx.stroke();
 
-          // Draw bar number with background (only when not too dense)
-          if (showBarNumbers) {
-            const barNum = barNumber.toString();
-            this.ctx.font = 'bold 10px sans-serif';
-            const textWidth = this.ctx.measureText(barNum).width;
+          // Always draw bar number with background on downbeats
+          const barNum = barNumber.toString();
+          this.ctx.font = 'bold 10px sans-serif';
+          const textWidth = this.ctx.measureText(barNum).width;
 
-            // Background pill
-            this.ctx.fillStyle = isPast ? 'rgba(255, 204, 0, 0.9)' : 'rgba(255, 255, 255, 0.9)';
-            this.ctx.globalAlpha = 1;
-            this.ctx.beginPath();
-            this.ctx.roundRect(x + 2, 2, textWidth + 6, 13, 3);
-            this.ctx.fill();
+          // Background pill
+          this.ctx.fillStyle = isPast ? 'rgba(255, 204, 0, 0.9)' : 'rgba(255, 255, 255, 0.9)';
+          this.ctx.globalAlpha = 1;
+          this.ctx.beginPath();
+          this.ctx.roundRect(x + 2, 2, textWidth + 6, 13, 3);
+          this.ctx.fill();
 
-            // Text
-            this.ctx.fillStyle = '#000';
-            this.ctx.fillText(barNum, x + 5, 12);
-          }
+          // Text
+          this.ctx.fillStyle = '#000';
+          this.ctx.fillText(barNum, x + 5, 12);
         } else {
           // Regular beats: subtle lines (only shown when zoomed in enough)
           this.ctx.strokeStyle = isPast ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.25)';
@@ -279,7 +314,7 @@ class MixxWaveform extends LitElement {
       this.ctx.globalAlpha = 1;
     }
 
-    // Draw cue points
+    // Draw cue points (on top of beat markers)
     if (this.cuePoints && this.cuePoints.length > 0) {
       this.cuePoints.forEach((cue, i) => {
         // Only draw cues within the viewport
@@ -290,34 +325,91 @@ class MixxWaveform extends LitElement {
 
         // Draw cue marker line
         this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 2;
+        this.ctx.globalAlpha = 0.9;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, 0);
+        this.ctx.lineTo(x, height - 14);
+        this.ctx.stroke();
+
+        // Draw cue marker triangle at bottom (pointing up)
+        this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, height - 14);
+        this.ctx.lineTo(x - 5, height - 4);
+        this.ctx.lineTo(x + 5, height - 4);
+        this.ctx.closePath();
+        this.ctx.fill();
+
+        // Draw label at bottom (centered on marker)
+        const label = cue.name || cue.type;
+        this.ctx.font = 'bold 9px sans-serif';
+        const textWidth = this.ctx.measureText(label).width;
+
+        // Background pill for label (centered)
+        this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 0.95;
+        this.ctx.beginPath();
+        this.ctx.roundRect(x - textWidth/2 - 3, height - 4, textWidth + 6, 12, 2);
+        this.ctx.fill();
+
+        // Label text (centered)
+        this.ctx.fillStyle = '#000';
+        this.ctx.globalAlpha = 1;
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(label, x, height + 5);
+        this.ctx.textAlign = 'left';
+      });
+      this.ctx.globalAlpha = 1;
+    }
+
+    // Draw phrase markers (on top of everything)
+    if (this.phrases && this.phrases.length > 0) {
+      this.phrases.forEach((phrase) => {
+        // Skip phrases outside viewport
+        if (phrase.time > viewport.end || phrase.time < viewport.start) return;
+
+        const x = this.timeToX(phrase.time, width);
+        const color = MixxWaveform.PHRASE_COLORS[phrase.label] || '#666666';
+
+        // Draw phrase marker line
+        this.ctx.strokeStyle = color;
         this.ctx.lineWidth = 3;
         this.ctx.globalAlpha = 0.9;
         this.ctx.beginPath();
         this.ctx.moveTo(x, 0);
-        this.ctx.lineTo(x, height);
+        this.ctx.lineTo(x, height - 14);
         this.ctx.stroke();
 
-        // Draw cue marker triangle at top
+        // Draw phrase marker triangle at bottom (pointing up)
         this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 1;
         this.ctx.beginPath();
-        this.ctx.moveTo(x, 0);
-        this.ctx.lineTo(x - 6, 12);
-        this.ctx.lineTo(x + 6, 12);
+        this.ctx.moveTo(x, height - 14);
+        this.ctx.lineTo(x - 5, height - 4);
+        this.ctx.lineTo(x + 5, height - 4);
         this.ctx.closePath();
         this.ctx.fill();
 
-        // Draw cue number
-        this.ctx.fillStyle = '#000';
+        // Draw label at bottom (centered on marker)
+        const label = phrase.label;
         this.ctx.font = 'bold 9px sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText((i + 1).toString(), x, 10);
-        this.ctx.textAlign = 'left';
+        const textWidth = this.ctx.measureText(label).width;
 
-        // Draw cue name below triangle
+        // Background pill for label (centered)
         this.ctx.fillStyle = color;
-        this.ctx.font = '10px sans-serif';
-        this.ctx.globalAlpha = 0.9;
-        this.ctx.fillText(cue.name || cue.type, x + 8, 22);
+        this.ctx.globalAlpha = 0.95;
+        this.ctx.beginPath();
+        this.ctx.roundRect(x - textWidth/2 - 3, height - 4, textWidth + 6, 12, 2);
+        this.ctx.fill();
+
+        // Label text (centered)
+        this.ctx.fillStyle = '#fff';
+        this.ctx.globalAlpha = 1;
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText(label, x, height + 5);
+        this.ctx.textAlign = 'left';
       });
       this.ctx.globalAlpha = 1;
     }
@@ -397,6 +489,7 @@ class MixxWaveformOverview extends LitElement {
   static properties = {
     beats: { type: Array },
     cuePoints: { type: Array },
+    phrases: { type: Array },
     duration: { type: Number },
     currentTime: { type: Number },
     waveform: { type: Object },
@@ -421,6 +514,7 @@ class MixxWaveformOverview extends LitElement {
     super();
     this.beats = [];
     this.cuePoints = [];
+    this.phrases = [];
     this.duration = 0;
     this.currentTime = 0;
     this.waveform = null;
@@ -466,7 +560,7 @@ class MixxWaveformOverview extends LitElement {
   }
 
   updated(changed) {
-    if (changed.has('beats') || changed.has('cuePoints') || changed.has('duration') || changed.has('waveform') || changed.has('zoom')) {
+    if (changed.has('beats') || changed.has('cuePoints') || changed.has('phrases') || changed.has('duration') || changed.has('waveform') || changed.has('zoom')) {
       this.draw();
     }
   }
@@ -538,30 +632,58 @@ class MixxWaveformOverview extends LitElement {
       this.ctx.globalAlpha = 1;
     }
 
-    // Draw cue point markers (small triangles at top)
+    // Draw cue point markers (triangles pointing up at bottom with lines)
     if (this.cuePoints && this.cuePoints.length > 0) {
-      this.cuePoints.forEach((cue, i) => {
+      this.cuePoints.forEach((cue) => {
         const x = (cue.time / this.duration) * width;
         const color = MixxWaveform.CUE_COLORS[cue.type] || '#ffffff';
 
-        // Draw small triangle marker
-        this.ctx.fillStyle = color;
-        this.ctx.globalAlpha = 0.9;
+        // Draw vertical line
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 1.5;
+        this.ctx.globalAlpha = 0.7;
         this.ctx.beginPath();
         this.ctx.moveTo(x, 0);
-        this.ctx.lineTo(x - 4, 8);
-        this.ctx.lineTo(x + 4, 8);
+        this.ctx.lineTo(x, height - 6);
+        this.ctx.stroke();
+
+        // Draw small triangle marker at bottom (pointing up)
+        this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, height - 6);
+        this.ctx.lineTo(x - 4, height);
+        this.ctx.lineTo(x + 4, height);
         this.ctx.closePath();
         this.ctx.fill();
+      });
+      this.ctx.globalAlpha = 1;
+    }
 
-        // Draw thin vertical line
+    // Draw phrase markers (triangles pointing up at bottom with lines)
+    if (this.phrases && this.phrases.length > 0) {
+      this.phrases.forEach((phrase) => {
+        const x = (phrase.time / this.duration) * width;
+        const color = MixxWaveform.PHRASE_COLORS[phrase.label] || '#666666';
+
+        // Draw vertical line
         this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 1;
-        this.ctx.globalAlpha = 0.5;
+        this.ctx.lineWidth = 2;
+        this.ctx.globalAlpha = 0.8;
         this.ctx.beginPath();
-        this.ctx.moveTo(x, 8);
-        this.ctx.lineTo(x, height);
+        this.ctx.moveTo(x, 0);
+        this.ctx.lineTo(x, height - 6);
         this.ctx.stroke();
+
+        // Draw small triangle marker at bottom (pointing up)
+        this.ctx.fillStyle = color;
+        this.ctx.globalAlpha = 1;
+        this.ctx.beginPath();
+        this.ctx.moveTo(x, height - 6);
+        this.ctx.lineTo(x - 4, height);
+        this.ctx.lineTo(x + 4, height);
+        this.ctx.closePath();
+        this.ctx.fill();
       });
       this.ctx.globalAlpha = 1;
     }

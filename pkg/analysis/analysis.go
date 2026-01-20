@@ -10,14 +10,37 @@ import (
 	"strings"
 )
 
-// TrackAnalysis represents the JSON output for a track with multiple analyzer results.
+// TrackAnalysis represents the JSON output for a track with separate grid and marker results.
 type TrackAnalysis struct {
-	File       string               `json:"file"`
-	Duration   float64              `json:"duration"`
-	SampleRate int                  `json:"sample_rate"`
-	Analyzers  map[string]*Analysis `json:"analyzers"`
-	CuePoints  []CuePoint           `json:"cue_points,omitempty"`
-	Waveform   *Waveform            `json:"waveform,omitempty"`
+	File       string                  `json:"file"`
+	Duration   float64                 `json:"duration"`
+	SampleRate int                     `json:"sample_rate"`
+	Grids      map[string]*GridAnalysis   `json:"grids"`             // Beat grid strategies
+	Markers    map[string]*MarkerAnalysis `json:"markers,omitempty"` // Cue/phrase marker strategies
+	Waveform   *Waveform               `json:"waveform,omitempty"`
+}
+
+// GridAnalysis represents beat detection results from a single grid analyzer.
+type GridAnalysis struct {
+	BPM   float64   `json:"bpm"`
+	Beats []float64 `json:"beats"`
+	Error string    `json:"error,omitempty"`
+
+	// Downbeat detection (indices into Beats that are downbeats)
+	Downbeats []int `json:"downbeats,omitempty"`
+
+	// Extended data from QM-DSP two-stage process (optional)
+	DetectionFunction []float64 `json:"detection_function,omitempty"` // Stage 1: onset strength
+	BeatPeriods       []int     `json:"beat_periods,omitempty"`       // Stage 2: tempo per window
+	StepSizeFrames    int       `json:"step_size_frames,omitempty"`   // DF frame step in samples
+	WindowSize        int       `json:"window_size,omitempty"`        // FFT window size
+}
+
+// MarkerAnalysis represents cue points and phrases from a single marker analyzer.
+type MarkerAnalysis struct {
+	CuePoints []CuePoint `json:"cue_points,omitempty"` // Detected cue points
+	Phrases   []Phrase   `json:"phrases,omitempty"`    // Detected phrases/sections
+	Error     string     `json:"error,omitempty"`
 }
 
 // Segment represents a structural segment of a track.
@@ -27,23 +50,11 @@ type Segment struct {
 	Type  int     `json:"type"`  // Segment type (0 to num_clusters-1)
 }
 
-// Analysis represents beat detection results from a single analyzer.
-type Analysis struct {
-	BPM   float64   `json:"bpm"`
-	Beats []float64 `json:"beats"`
-	Error string    `json:"error,omitempty"`
-
-	// Extended data from QM-DSP two-stage process (optional)
-	DetectionFunction []float64 `json:"detection_function,omitempty"` // Stage 1: onset strength
-	BeatPeriods       []int     `json:"beat_periods,omitempty"`       // Stage 2: tempo per window
-	StepSizeFrames    int       `json:"step_size_frames,omitempty"`   // DF frame step in samples
-	WindowSize        int       `json:"window_size,omitempty"`        // FFT window size
-
-	// Downbeat and structural analysis (optional)
-	Downbeats       []int      `json:"downbeats,omitempty"`        // Indices into Beats that are downbeats
-	Segments        []Segment  `json:"segments,omitempty"`         // Structural segments
-	NumSegmentTypes int        `json:"num_segment_types,omitempty"` // Number of distinct segment types
-	Cues            []CuePoint `json:"cues,omitempty"`             // Detected cue points
+// Phrase represents a musical phrase/section detected by SongFormer.
+type Phrase struct {
+	Time     float64 `json:"time"`     // Start time in seconds
+	Label    string  `json:"label"`    // Original label (intro, verse, chorus, etc.)
+	Duration float64 `json:"duration"` // Duration in seconds (calculated)
 }
 
 // Waveform contains downsampled waveform data for visualization.
@@ -57,17 +68,22 @@ type Waveform struct {
 type AnalyzerType string
 
 const (
-	AnalyzerQMDSP      AnalyzerType = "qm-dsp"          // CGO qm-dsp library (basic)
-	AnalyzerQMDSPEx    AnalyzerType = "qm-dsp-extended" // CGO qm-dsp with two-stage process data
-	AnalyzerMLPython   AnalyzerType = "ml-python"       // Python ML subprocess
-	AnalyzerTensorFlow AnalyzerType = "tensorflow"      // TensorFlow Go bindings
+	AnalyzerMixx         AnalyzerType = "mixx"          // CGO qm-dsp library (basic)
+	AnalyzerMixxExtended AnalyzerType = "mixx-extended" // CGO qm-dsp with two-stage process data
+	AnalyzerRekordboxPy  AnalyzerType = "rekordbox-py"  // Python ML subprocess (Rekordbox model)
+	AnalyzerRekordboxGo  AnalyzerType = "rekordbox-go"  // TensorFlow Go bindings (Rekordbox model)
+	AnalyzerBeatThis     AnalyzerType = "beatthis"      // CPJKU/beat_this via ONNX (small model)
+	AnalyzerBeatThisFull AnalyzerType = "beatthis-full" // CPJKU/beat_this via ONNX (full model)
 )
 
 // Analyzer wraps multiple beat analyzers for comparison.
 type Analyzer struct {
-	mlPython *MLAnalyzer
-	tfGo     *TFAnalyzer
-	cue      *CueAnalyzer
+	mlPython      *MLAnalyzer
+	tfGo          *TFAnalyzer
+	cue           *CueAnalyzer
+	beatThis      *BeatThisAnalyzer
+	beatThisFull  *BeatThisAnalyzer
+	songformer    *SongFormerAnalyzer
 }
 
 // New creates a new Analyzer with all available implementations.
@@ -89,13 +105,44 @@ func New() (*Analyzer, error) {
 		a.cue = cue
 	}
 
+	// Try to initialize beat_this analyzer (small model)
+	if bt, err := NewBeatThisAnalyzer(); err == nil {
+		a.beatThis = bt
+	}
+
+	// Try to initialize beat_this analyzer (full model)
+	if btFull, err := NewBeatThisAnalyzerFull(); err == nil {
+		a.beatThisFull = btFull
+	}
+
+	// Try to initialize SongFormer analyzer (music structure)
+	if sf, err := NewSongFormerAnalyzer(); err == nil {
+		a.songformer = sf
+	}
+
 	return a, nil
 }
 
 // Close releases resources.
 func (a *Analyzer) Close() error {
+	var errs []error
 	if a.tfGo != nil {
-		return a.tfGo.Close()
+		if err := a.tfGo.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if a.beatThis != nil {
+		if err := a.beatThis.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if a.beatThisFull != nil {
+		if err := a.beatThisFull.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errs[0]
 	}
 	return nil
 }
@@ -103,17 +150,18 @@ func (a *Analyzer) Close() error {
 // AnalyzeFileWithPath analyzes a single audio file with all available analyzers.
 func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error) {
 	result := &TrackAnalysis{
-		File:      filepath.Base(audioPath),
-		Analyzers: make(map[string]*Analysis),
+		File:    filepath.Base(audioPath),
+		Grids:   make(map[string]*GridAnalysis),
+		Markers: make(map[string]*MarkerAnalysis),
 	}
 
 	// Run qm-dsp analyzer (CGO) - basic output
 	if qmResult, err := AnalyzeFile(audioPath); err != nil {
-		result.Analyzers[string(AnalyzerQMDSP)] = &Analysis{Error: err.Error()}
+		result.Grids[string(AnalyzerMixx)] = &GridAnalysis{Error: err.Error()}
 	} else {
 		result.Duration = qmResult.Duration
 		result.SampleRate = qmResult.SampleRate
-		result.Analyzers[string(AnalyzerQMDSP)] = &Analysis{
+		result.Grids[string(AnalyzerMixx)] = &GridAnalysis{
 			BPM:   qmResult.BPM,
 			Beats: qmResult.Beats,
 		}
@@ -122,24 +170,25 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 	// Run qm-dsp-extended analyzer (CGO) - full two-stage Mixxx process with segmentation
 	segConfig := DefaultSegmenterConfig()
 	if qmExResult, err := AnalyzeFileQMFull(audioPath, nil, &segConfig); err != nil {
-		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{Error: err.Error()}
+		result.Grids[string(AnalyzerMixxExtended)] = &GridAnalysis{Error: err.Error()}
 	} else {
 		if result.Duration == 0 {
 			result.Duration = qmExResult.Duration
 			result.SampleRate = qmExResult.SampleRate
 		}
 
-		// Convert segments from QM format
-		var segments []Segment
-		for _, seg := range qmExResult.Segments {
-			segments = append(segments, Segment{
-				Start: seg.Start,
-				End:   seg.End,
-				Type:  seg.Type,
-			})
+		// Grid analysis
+		result.Grids[string(AnalyzerMixxExtended)] = &GridAnalysis{
+			BPM:               qmExResult.BPM,
+			Beats:             qmExResult.Beats,
+			DetectionFunction: qmExResult.DetectionFunction,
+			BeatPeriods:       qmExResult.BeatPeriods,
+			StepSizeFrames:    qmExResult.StepSizeFrames,
+			WindowSize:        qmExResult.WindowSize,
+			Downbeats:         qmExResult.Downbeats,
 		}
 
-		// Convert cues from QM format
+		// Convert cues from QM beat analysis for markers
 		var cues []CuePoint
 		for _, cue := range qmExResult.Cues {
 			cueType := "unknown"
@@ -160,31 +209,21 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 				Name:       fmt.Sprintf("%s-%d", cueType, cue.TypeIndex),
 			})
 		}
-
-		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{
-			BPM:               qmExResult.BPM,
-			Beats:             qmExResult.Beats,
-			DetectionFunction: qmExResult.DetectionFunction,
-			BeatPeriods:       qmExResult.BeatPeriods,
-			StepSizeFrames:    qmExResult.StepSizeFrames,
-			WindowSize:        qmExResult.WindowSize,
-			Downbeats:         qmExResult.Downbeats,
-			Segments:          segments,
-			NumSegmentTypes:   qmExResult.NumSegmentTypes,
-			Cues:              cues,
+		if len(cues) > 0 {
+			result.Markers["beats"] = &MarkerAnalysis{CuePoints: cues}
 		}
 	}
 
 	// Run ML Python analyzer
 	if a.mlPython != nil {
 		if mlResult, err := a.mlPython.AnalyzeFile(audioPath); err != nil {
-			result.Analyzers[string(AnalyzerMLPython)] = &Analysis{Error: err.Error()}
+			result.Grids[string(AnalyzerRekordboxPy)] = &GridAnalysis{Error: err.Error()}
 		} else {
 			if result.Duration == 0 {
 				result.Duration = mlResult.Duration
 				result.SampleRate = mlResult.SampleRate
 			}
-			result.Analyzers[string(AnalyzerMLPython)] = &Analysis{
+			result.Grids[string(AnalyzerRekordboxPy)] = &GridAnalysis{
 				BPM:   mlResult.BPM,
 				Beats: mlResult.Beats,
 			}
@@ -194,21 +233,55 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 	// Run TensorFlow Go analyzer
 	if a.tfGo != nil {
 		if tfResult, err := a.tfGo.AnalyzeFile(audioPath); err != nil {
-			result.Analyzers[string(AnalyzerTensorFlow)] = &Analysis{Error: err.Error()}
+			result.Grids[string(AnalyzerRekordboxGo)] = &GridAnalysis{Error: err.Error()}
 		} else {
 			if result.Duration == 0 {
 				result.Duration = tfResult.Duration
 				result.SampleRate = tfResult.SampleRate
 			}
-			result.Analyzers[string(AnalyzerTensorFlow)] = &Analysis{
+			result.Grids[string(AnalyzerRekordboxGo)] = &GridAnalysis{
 				BPM:   tfResult.BPM,
 				Beats: tfResult.Beats,
 			}
 		}
 	}
 
-	if len(result.Analyzers) == 0 {
-		return nil, fmt.Errorf("no analyzers available")
+	// Run beat_this analyzer (small model)
+	if a.beatThis != nil {
+		if btResult, err := a.beatThis.AnalyzeFile(audioPath); err != nil {
+			result.Grids[string(AnalyzerBeatThis)] = &GridAnalysis{Error: err.Error()}
+		} else {
+			if result.Duration == 0 {
+				result.Duration = btResult.Duration
+				result.SampleRate = btResult.SampleRate
+			}
+			result.Grids[string(AnalyzerBeatThis)] = &GridAnalysis{
+				BPM:       btResult.BPM,
+				Beats:     btResult.Beats,
+				Downbeats: btResult.Downbeats,
+			}
+		}
+	}
+
+	// Run beat_this analyzer (full model)
+	if a.beatThisFull != nil {
+		if btResult, err := a.beatThisFull.AnalyzeFile(audioPath); err != nil {
+			result.Grids[string(AnalyzerBeatThisFull)] = &GridAnalysis{Error: err.Error()}
+		} else {
+			if result.Duration == 0 {
+				result.Duration = btResult.Duration
+				result.SampleRate = btResult.SampleRate
+			}
+			result.Grids[string(AnalyzerBeatThisFull)] = &GridAnalysis{
+				BPM:       btResult.BPM,
+				Beats:     btResult.Beats,
+				Downbeats: btResult.Downbeats,
+			}
+		}
+	}
+
+	if len(result.Grids) == 0 {
+		return nil, fmt.Errorf("no grid analyzers available")
 	}
 
 	// Generate waveform data
@@ -219,12 +292,21 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 		result.Waveform = waveform
 	}
 
-	// Detect cue points
+	// Detect cue points with Mixx analyzer (SampleCNN features)
 	if a.cue != nil {
 		if cueResult, err := a.cue.AnalyzeFile(audioPath, 8, 8.0); err != nil {
 			fmt.Printf("  Warning: could not detect cue points: %v\n", err)
 		} else {
-			result.CuePoints = cueResult.CuePoints
+			result.Markers["mixx"] = &MarkerAnalysis{CuePoints: cueResult.CuePoints}
+		}
+	}
+
+	// Analyze music structure (phrases/sections) with SongFormer
+	if a.songformer != nil {
+		if sfResult, err := a.songformer.AnalyzeFile(audioPath); err != nil {
+			fmt.Printf("  Warning: could not analyze music structure: %v\n", err)
+		} else {
+			result.Markers["songformer"] = &MarkerAnalysis{Phrases: sfResult.Phrases}
 		}
 	}
 
@@ -328,21 +410,36 @@ func (a *Analyzer) AnalyzeDir(dir string, force bool) error {
 			return fmt.Errorf("write JSON: %w", err)
 		}
 
-		// Print summary for each analyzer
+		// Print summary for each grid analyzer
 		fmt.Printf("  Duration: %.1fs\n", analysis.Duration)
-		for name, a := range analysis.Analyzers {
-			if a.Error != "" {
-				fmt.Printf("  %s: error - %s\n", name, a.Error)
+		fmt.Printf("  Grids:\n")
+		for name, g := range analysis.Grids {
+			if g.Error != "" {
+				fmt.Printf("    %s: error - %s\n", name, g.Error)
 			} else {
-				fmt.Printf("  %s: BPM=%.1f, Beats=%d\n", name, a.BPM, len(a.Beats))
+				fmt.Printf("    %s: BPM=%.1f, Beats=%d\n", name, g.BPM, len(g.Beats))
 			}
 		}
 		if analysis.Waveform != nil {
 			fmt.Printf("  Waveform: %d samples at %d px/sec\n",
 				len(analysis.Waveform.Peaks), analysis.Waveform.PixelsPerSec)
 		}
-		if len(analysis.CuePoints) > 0 {
-			fmt.Printf("  Cue points: %d detected\n", len(analysis.CuePoints))
+		if len(analysis.Markers) > 0 {
+			fmt.Printf("  Markers:\n")
+			for name, m := range analysis.Markers {
+				if m.Error != "" {
+					fmt.Printf("    %s: error - %s\n", name, m.Error)
+				} else {
+					parts := []string{}
+					if len(m.CuePoints) > 0 {
+						parts = append(parts, fmt.Sprintf("%d cues", len(m.CuePoints)))
+					}
+					if len(m.Phrases) > 0 {
+						parts = append(parts, fmt.Sprintf("%d phrases", len(m.Phrases)))
+					}
+					fmt.Printf("    %s: %s\n", name, strings.Join(parts, ", "))
+				}
+			}
 		}
 
 		return nil

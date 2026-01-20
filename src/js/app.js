@@ -11,7 +11,8 @@ class MixxApp extends LitElement {
     currentTrack: { type: Object },
     analysis: { type: Object },
     loading: { type: Boolean },
-    selectedAnalyzer: { type: String },
+    selectedGrid: { type: String },
+    selectedMarker: { type: String },
     waveformZoom: { type: Number },
     audioEngine: { type: Object },
   };
@@ -136,19 +137,38 @@ class MixxApp extends LitElement {
       overflow: hidden;
     }
 
-    .analyzer-selector {
+    .controls-row {
       display: flex;
+      gap: 2rem;
+      align-items: center;
+    }
+
+    .control-group {
+      display: flex;
+      align-items: center;
       gap: 0.5rem;
     }
 
+    .control-label {
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .analyzer-selector {
+      display: flex;
+      gap: 0.25rem;
+    }
+
     .analyzer-btn {
-      padding: 0.4rem 0.75rem;
+      padding: 0.3rem 0.6rem;
       background: var(--bg-tertiary);
       border: none;
       border-radius: 4px;
       color: var(--text-primary);
       cursor: pointer;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
     }
 
     .analyzer-btn.active {
@@ -158,6 +178,27 @@ class MixxApp extends LitElement {
     .analyzer-btn:disabled {
       opacity: 0.3;
       cursor: not-allowed;
+    }
+
+    .toggle-btn {
+      padding: 0.3rem 0.6rem;
+      background: var(--bg-tertiary);
+      border: none;
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: all 0.2s;
+    }
+
+    .toggle-btn.active {
+      background: var(--accent-dim);
+      color: var(--text-primary);
+    }
+
+    .toggle-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
     }
 
     .loading {
@@ -188,7 +229,8 @@ class MixxApp extends LitElement {
     this.currentTrack = null;
     this.analysis = null;
     this.loading = true;
-    this.selectedAnalyzer = 'qm-dsp-extended';
+    this.selectedGrid = 'beatthis';
+    this.selectedMarker = 'mixx';
     this.waveformZoom = 1;
     this.audioEngine = null;
   }
@@ -247,11 +289,19 @@ class MixxApp extends LitElement {
         const response = await fetch(`/api/music/${track.json_path}`);
         this.analysis = await response.json();
 
-        // Select first available analyzer
-        if (this.analysis.analyzers) {
-          const analyzers = Object.keys(this.analysis.analyzers);
-          if (!analyzers.includes(this.selectedAnalyzer)) {
-            this.selectedAnalyzer = analyzers[0];
+        // Select first available grid
+        if (this.analysis.grids) {
+          const grids = Object.keys(this.analysis.grids);
+          if (!grids.includes(this.selectedGrid)) {
+            this.selectedGrid = grids[0];
+          }
+        }
+
+        // Select first available marker
+        if (this.analysis.markers) {
+          const markers = Object.keys(this.analysis.markers);
+          if (!markers.includes(this.selectedMarker)) {
+            this.selectedMarker = markers[0];
           }
         }
       } catch (e) {
@@ -260,8 +310,12 @@ class MixxApp extends LitElement {
     }
   }
 
-  selectAnalyzer(name) {
-    this.selectedAnalyzer = name;
+  selectGrid(name) {
+    this.selectedGrid = name;
+  }
+
+  selectMarker(name) {
+    this.selectedMarker = name;
   }
 
   handleZoomChange(e) {
@@ -269,27 +323,55 @@ class MixxApp extends LitElement {
   }
 
   get currentBeats() {
-    if (!this.analysis?.analyzers?.[this.selectedAnalyzer]) return [];
-    return this.analysis.analyzers[this.selectedAnalyzer].beats || [];
+    if (!this.analysis?.grids?.[this.selectedGrid]) return [];
+    return this.analysis.grids[this.selectedGrid].beats || [];
   }
 
   get currentBPM() {
-    if (!this.analysis?.analyzers?.[this.selectedAnalyzer]) return 0;
-    return this.analysis.analyzers[this.selectedAnalyzer].bpm || 0;
+    if (!this.analysis?.grids?.[this.selectedGrid]) return 0;
+    return this.analysis.grids[this.selectedGrid].bpm || 0;
   }
 
   get currentCuePoints() {
-    // Prefer per-analyzer cues, fall back to top-level cue_points
-    const analyzerCues = this.analysis?.analyzers?.[this.selectedAnalyzer]?.cues;
-    if (analyzerCues && analyzerCues.length > 0) {
-      return analyzerCues;
-    }
-    return this.analysis?.cue_points || [];
+    if (!this.selectedMarker) return [];
+    return this.analysis?.markers?.[this.selectedMarker]?.cue_points || [];
   }
 
-  get availableAnalyzers() {
-    if (!this.analysis?.analyzers) return [];
-    return Object.keys(this.analysis.analyzers);
+  get currentPhrases() {
+    if (!this.selectedMarker) return [];
+    return this.analysis?.markers?.[this.selectedMarker]?.phrases || [];
+  }
+
+  get availableGrids() {
+    if (!this.analysis?.grids) return [];
+    return Object.keys(this.analysis.grids);
+  }
+
+  get availableMarkers() {
+    if (!this.analysis?.markers) return [];
+    return Object.keys(this.analysis.markers);
+  }
+
+  formatGridName(name) {
+    const names = {
+      'mixx': 'Mixx',
+      'mixx-extended': 'Mixx+',
+      'rekordbox-py': 'RekordboxPy',
+      'rekordbox-go': 'RekordboxGo',
+      'beatthis': 'BeatThis',
+      'beatthis-full': 'BeatThis+',
+    };
+    return names[name] || name;
+  }
+
+  formatMarkerName(name) {
+    const names = {
+      'mixx': 'Mixx',
+      'beats': 'Beats',
+      'songformer': 'SongFormer',
+      'rekordbox': 'Rekordbox',
+    };
+    return names[name] || name;
   }
 
   render() {
@@ -301,22 +383,53 @@ class MixxApp extends LitElement {
       <header>
         <h1>Beat Grid Visualizer</h1>
         ${this.analysis ? html`
-          <div class="analyzer-selector">
-            ${this.availableAnalyzers.map(name => {
-              const a = this.analysis.analyzers[name];
-              const hasError = a.error;
-              return html`
-                <button
-                  class="analyzer-btn ${name === this.selectedAnalyzer ? 'active' : ''}"
-                  ?disabled=${hasError}
-                  @click=${() => this.selectAnalyzer(name)}
-                  title=${hasError ? a.error : `${a.bpm?.toFixed(1)} BPM, ${a.beats?.length} beats`}
-                >
-                  ${name}
-                  ${hasError ? ' (error)' : ` (${a.bpm?.toFixed(0)})`}
-                </button>
-              `;
-            })}
+          <div class="controls-row">
+            <div class="control-group">
+              <span class="control-label">Grid</span>
+              <div class="analyzer-selector">
+                ${this.availableGrids.map(name => {
+                  const g = this.analysis.grids[name];
+                  const hasError = g.error;
+                  const hasDownbeats = g.downbeats?.length > 0;
+                  return html`
+                    <button
+                      class="analyzer-btn ${name === this.selectedGrid ? 'active' : ''}"
+                      ?disabled=${hasError}
+                      @click=${() => this.selectGrid(name)}
+                      title=${hasError ? g.error : `${g.bpm?.toFixed(1)} BPM, ${g.beats?.length} beats${hasDownbeats ? ', has downbeats' : ''}`}
+                    >
+                      ${this.formatGridName(name)}
+                    </button>
+                  `;
+                })}
+              </div>
+            </div>
+            ${this.availableMarkers.length > 0 ? html`
+              <div class="control-group">
+                <span class="control-label">Markers</span>
+                <div class="analyzer-selector">
+                  ${this.availableMarkers.map(name => {
+                    const m = this.analysis.markers[name];
+                    const hasError = m.error;
+                    const hasCues = m.cue_points?.length > 0;
+                    const hasPhrases = m.phrases?.length > 0;
+                    const info = [];
+                    if (hasCues) info.push(`${m.cue_points.length} cues`);
+                    if (hasPhrases) info.push(`${m.phrases.length} phrases`);
+                    return html`
+                      <button
+                        class="analyzer-btn ${name === this.selectedMarker ? 'active' : ''}"
+                        ?disabled=${hasError}
+                        @click=${() => this.selectMarker(name)}
+                        title=${hasError ? m.error : info.join(', ')}
+                      >
+                        ${this.formatMarkerName(name)}
+                      </button>
+                    `;
+                  })}
+                </div>
+              </div>
+            ` : ''}
           </div>
         ` : ''}
       </header>
@@ -355,6 +468,7 @@ class MixxApp extends LitElement {
         <mixx-waveform-overview
           .beats=${this.currentBeats}
           .cuePoints=${this.currentCuePoints}
+          .phrases=${this.currentPhrases}
           .duration=${this.analysis?.duration || 0}
           .waveform=${this.analysis?.waveform || null}
           .zoom=${this.waveformZoom}
@@ -366,6 +480,7 @@ class MixxApp extends LitElement {
           <mixx-waveform
             .beats=${this.currentBeats}
             .cuePoints=${this.currentCuePoints}
+            .phrases=${this.currentPhrases}
             .duration=${this.analysis?.duration || 0}
             .waveform=${this.analysis?.waveform || null}
             @zoomchange=${this.handleZoomChange}
