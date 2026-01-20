@@ -1,5 +1,6 @@
 // analyzer.cpp - Implementation of C API for Mixxx beat detection
-// Wraps qm-dsp library (Queen Mary DSP) for two-stage beat detection
+// Wraps qm-dsp library (Queen Mary DSP) for two-stage beat detection,
+// downbeat detection, and segmentation
 
 #include "analyzer.h"
 
@@ -15,6 +16,8 @@
 // qm-dsp includes
 #include "dsp/onsets/DetectionFunction.h"
 #include "dsp/tempotracking/TempoTrackV2.h"
+#include "dsp/tempotracking/DownBeat.h"
+#include "dsp/segmentation/ClusterMeltSegmenter.h"
 #include "maths/MathUtilities.h"
 
 namespace {
@@ -26,6 +29,17 @@ constexpr double kDefaultDBRise = 3.0;
 constexpr double kDefaultInputTempo = 120.0;
 constexpr double kDefaultAlpha = 0.9;
 constexpr double kDefaultTightness = 4.0;
+constexpr int kDefaultBeatsPerBar = 4;
+
+// Default segmenter parameters
+constexpr int kDefaultSegFeatureType = FEATURE_TYPE_CONSTQ;
+constexpr double kDefaultSegHopSize = 0.2;
+constexpr double kDefaultSegWindowSize = 0.6;
+constexpr int kDefaultSegNumClusters = 10;
+constexpr int kDefaultSegNumHMMStates = 40;
+
+// Decimation factor for downbeat analysis (matches qm-dsp recommendation)
+constexpr size_t kDownbeatDecimationFactor = 16;
 
 // Helper to downmix stereo to mono
 void downmixToMono(const float* stereo, double* mono, size_t frames) {
@@ -37,6 +51,13 @@ void downmixToMono(const float* stereo, double* mono, size_t frames) {
 
 // Helper to convert mono float samples to double
 void convertToDouble(const float* src, double* dst, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        dst[i] = static_cast<double>(src[i]);
+    }
+}
+
+// Helper to convert float to double
+void convertFloatToDouble(const float* src, double* dst, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         dst[i] = static_cast<double>(src[i]);
     }
@@ -74,6 +95,16 @@ AnalyzerConfig getEffectiveConfig(const AnalyzerConfig* config) {
     return cfg;
 }
 
+AnalyzerSegmenterConfig getEffectiveSegConfig(const AnalyzerSegmenterConfig* config) {
+    AnalyzerSegmenterConfig cfg;
+    if (config) {
+        cfg = *config;
+    } else {
+        cfg = segmenter_default_config();
+    }
+    return cfg;
+}
+
 } // namespace
 
 // Streaming analyzer state
@@ -89,6 +120,9 @@ struct QMAnalyzer {
     std::vector<double> overlapBuffer;
     size_t overlapPos;
     int64_t totalFramesProcessed;
+
+    // Audio buffer for downbeat/segmentation analysis
+    std::vector<float> audioBuffer;
 
     QMAnalyzer(int sr, int ch, const AnalyzerConfig& cfg)
         : sampleRate(sr)
@@ -123,6 +157,17 @@ AnalyzerConfig analyzer_default_config(void) {
     cfg.constrain_tempo = 0;
     cfg.alpha = kDefaultAlpha;
     cfg.tightness = kDefaultTightness;
+    cfg.beats_per_bar = kDefaultBeatsPerBar;
+    return cfg;
+}
+
+AnalyzerSegmenterConfig segmenter_default_config(void) {
+    AnalyzerSegmenterConfig cfg;
+    cfg.feature_type = kDefaultSegFeatureType;
+    cfg.hop_size = kDefaultSegHopSize;
+    cfg.window_size = kDefaultSegWindowSize;
+    cfg.num_clusters = kDefaultSegNumClusters;
+    cfg.num_hmm_states = kDefaultSegNumHMMStates;
     return cfg;
 }
 
@@ -131,7 +176,7 @@ AnalyzerResult* analyzer_analyze_file(const char* filepath) {
 }
 
 AnalyzerResult* analyzer_analyze_file_config(const char* filepath, const AnalyzerConfig* config) {
-    AnalyzerResultEx* exResult = analyzer_analyze_file_ex(filepath, config);
+    AnalyzerResultEx* exResult = analyzer_analyze_file_ex(filepath, config, nullptr);
     if (!exResult) {
         return nullptr;
     }
@@ -161,7 +206,9 @@ AnalyzerResult* analyzer_analyze_file_config(const char* filepath, const Analyze
     return result;
 }
 
-AnalyzerResultEx* analyzer_analyze_file_ex(const char* filepath, const AnalyzerConfig* config) {
+AnalyzerResultEx* analyzer_analyze_file_ex(const char* filepath,
+                                           const AnalyzerConfig* config,
+                                           const AnalyzerSegmenterConfig* seg_config) {
     auto* result = static_cast<AnalyzerResultEx*>(calloc(1, sizeof(AnalyzerResultEx)));
     if (!result) {
         return nullptr;
@@ -214,7 +261,7 @@ AnalyzerResultEx* analyzer_analyze_file_ex(const char* filepath, const AnalyzerC
     sf_close(sndfile);
 
     // Finalize and get results
-    AnalyzerResultEx* finalResult = analyzer_finalize(analyzer);
+    AnalyzerResultEx* finalResult = analyzer_finalize(analyzer, seg_config);
     analyzer_destroy(analyzer);
 
     if (!finalResult) {
@@ -244,6 +291,10 @@ void analyzer_free_result_ex(AnalyzerResultEx* result) {
     free(result->error);
     free(result->detection_function);
     free(result->beat_periods);
+    free(result->downbeats);
+    free(result->beat_spectral_diff);
+    free(result->segments);
+    free(result->cue_points);
     free(result);
 }
 
@@ -274,6 +325,11 @@ int analyzer_process(QMAnalyzer* analyzer, const float* samples, size_t num_fram
         convertToDouble(samples, monoBuffer.data(), num_frames);
     } else {
         downmixToMono(samples, monoBuffer.data(), num_frames);
+    }
+
+    // Store mono audio for downbeat/segmentation analysis
+    for (size_t i = 0; i < num_frames; ++i) {
+        analyzer->audioBuffer.push_back(static_cast<float>(monoBuffer[i]));
     }
 
     // Process through overlap buffer
@@ -311,7 +367,7 @@ int analyzer_process(QMAnalyzer* analyzer, const float* samples, size_t num_fram
     return 0;
 }
 
-AnalyzerResultEx* analyzer_finalize(QMAnalyzer* analyzer) {
+AnalyzerResultEx* analyzer_finalize(QMAnalyzer* analyzer, const AnalyzerSegmenterConfig* seg_config) {
     if (!analyzer) {
         return nullptr;
     }
@@ -419,6 +475,145 @@ AnalyzerResultEx* analyzer_finalize(QMAnalyzer* analyzer) {
         result->bpm = 60.0 / avgInterval;
     }
 
+    // === Downbeat Detection ===
+    int beatsPerBar = analyzer->config.beats_per_bar > 0 ?
+        analyzer->config.beats_per_bar : kDefaultBeatsPerBar;
+
+    if (beats.size() >= 4 && !analyzer->audioBuffer.empty()) {
+        // Create downbeat detector
+        DownBeat downbeat(static_cast<float>(analyzer->sampleRate),
+                          kDownbeatDecimationFactor,
+                          analyzer->stepSizeFrames);
+        downbeat.setBeatsPerBar(beatsPerBar);
+
+        // Push audio through decimator
+        size_t blockSize = analyzer->stepSizeFrames;
+        for (size_t i = 0; i + blockSize <= analyzer->audioBuffer.size(); i += blockSize) {
+            downbeat.pushAudioBlock(analyzer->audioBuffer.data() + i);
+        }
+
+        // Get decimated audio
+        size_t decimatedLength = 0;
+        const float* decimatedAudio = downbeat.getBufferedAudio(decimatedLength);
+
+        if (decimatedAudio && decimatedLength > 0) {
+            // Find downbeats
+            std::vector<int> downbeatIndices;
+            downbeat.findDownBeats(decimatedAudio, decimatedLength, beats, downbeatIndices);
+
+            // Store downbeats
+            result->num_downbeats = downbeatIndices.size();
+            result->downbeats = static_cast<int*>(
+                malloc(sizeof(int) * result->num_downbeats));
+            if (result->downbeats) {
+                std::copy(downbeatIndices.begin(), downbeatIndices.end(), result->downbeats);
+            }
+
+            // Get beat spectral differences
+            std::vector<double> beatSD;
+            downbeat.getBeatSD(beatSD);
+            result->bsd_length = beatSD.size();
+            result->beat_spectral_diff = static_cast<double*>(
+                malloc(sizeof(double) * result->bsd_length));
+            if (result->beat_spectral_diff) {
+                std::copy(beatSD.begin(), beatSD.end(), result->beat_spectral_diff);
+            }
+        }
+    }
+
+    // === Segmentation ===
+    if (seg_config && !analyzer->audioBuffer.empty()) {
+        AnalyzerSegmenterConfig segCfg = getEffectiveSegConfig(seg_config);
+
+        ClusterMeltSegmenterParams params;
+        params.featureType = static_cast<feature_types>(
+            segCfg.feature_type > 0 ? segCfg.feature_type : kDefaultSegFeatureType);
+        params.hopSize = segCfg.hop_size > 0 ? segCfg.hop_size : kDefaultSegHopSize;
+        params.windowSize = segCfg.window_size > 0 ? segCfg.window_size : kDefaultSegWindowSize;
+        params.nHMMStates = segCfg.num_hmm_states > 0 ? segCfg.num_hmm_states : kDefaultSegNumHMMStates;
+        params.nclusters = segCfg.num_clusters > 0 ? segCfg.num_clusters : kDefaultSegNumClusters;
+
+        ClusterMeltSegmenter segmenter(params);
+        segmenter.initialise(analyzer->sampleRate);
+
+        int windowSize = segmenter.getWindowsize();
+        int hopSize = segmenter.getHopsize();
+
+        // Convert audio to double for segmenter
+        std::vector<double> audioDouble(analyzer->audioBuffer.size());
+        convertFloatToDouble(analyzer->audioBuffer.data(), audioDouble.data(),
+                            analyzer->audioBuffer.size());
+
+        // Extract features
+        for (size_t i = 0; i + windowSize <= audioDouble.size(); i += hopSize) {
+            segmenter.extractFeatures(audioDouble.data() + i, windowSize);
+        }
+
+        // Segment
+        segmenter.segment(segCfg.num_clusters);
+
+        // Get segmentation results
+        const Segmentation& segmentation = segmenter.getSegmentation();
+
+        result->num_segments = segmentation.segments.size();
+        result->num_segment_types = segmentation.nsegtypes;
+        result->segments = static_cast<AnalyzerSegment*>(
+            malloc(sizeof(AnalyzerSegment) * result->num_segments));
+
+        if (result->segments) {
+            for (size_t i = 0; i < result->num_segments; ++i) {
+                result->segments[i].start = static_cast<double>(
+                    segmentation.segments[i].start) / analyzer->sampleRate;
+                result->segments[i].end = static_cast<double>(
+                    segmentation.segments[i].end) / analyzer->sampleRate;
+                result->segments[i].type = segmentation.segments[i].type;
+            }
+        }
+    }
+
+    // === Generate Cue Points ===
+    std::vector<CuePoint> cues;
+
+    // Add phrase cues (every 4 or 8 bars based on downbeats)
+    if (result->num_downbeats > 0 && result->downbeats) {
+        int phraseBars = 8; // 8-bar phrases
+        for (size_t i = 0; i < result->num_downbeats; i += phraseBars) {
+            int beatIdx = result->downbeats[i];
+            if (beatIdx >= 0 && static_cast<size_t>(beatIdx) < result->num_beats) {
+                CuePoint cue;
+                cue.time = result->beats[beatIdx];
+                cue.type = CUE_TYPE_PHRASE;
+                cue.type_index = static_cast<int>(i / phraseBars);
+                cue.confidence = 0.8;
+                cues.push_back(cue);
+            }
+        }
+    }
+
+    // Add section cues from segmentation
+    if (result->num_segments > 0 && result->segments) {
+        for (size_t i = 0; i < result->num_segments; ++i) {
+            CuePoint cue;
+            cue.time = result->segments[i].start;
+            cue.type = CUE_TYPE_SECTION;
+            cue.type_index = result->segments[i].type;
+            cue.confidence = 0.7;
+            cues.push_back(cue);
+        }
+    }
+
+    // Sort cues by time
+    std::sort(cues.begin(), cues.end(),
+              [](const CuePoint& a, const CuePoint& b) { return a.time < b.time; });
+
+    // Store cue points
+    result->num_cue_points = cues.size();
+    result->cue_points = static_cast<CuePoint*>(
+        malloc(sizeof(CuePoint) * result->num_cue_points));
+    if (result->cue_points) {
+        std::copy(cues.begin(), cues.end(), result->cue_points);
+    }
+
     return result;
 }
 
@@ -432,7 +627,7 @@ size_t analyzer_get_df_count(QMAnalyzer* analyzer) {
 }
 
 const char* analyzer_version(void) {
-    return "2.0.0-mixxx-qmdsp";
+    return "3.0.0-mixxx-qmdsp-full";
 }
 
 } // extern "C"

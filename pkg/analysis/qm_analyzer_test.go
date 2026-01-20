@@ -100,8 +100,8 @@ func TestQMAnalyzerStreaming(t *testing.T) {
 		}
 	}
 
-	// Finalize
-	result, err := analyzer.Finalize()
+	// Finalize (nil for no segmentation)
+	result, err := analyzer.Finalize(nil)
 	if err != nil {
 		t.Fatalf("Finalize failed: %v", err)
 	}

@@ -279,6 +279,15 @@ class MixxApp extends LitElement {
     return this.analysis.analyzers[this.selectedAnalyzer].bpm || 0;
   }
 
+  get currentCuePoints() {
+    // Prefer per-analyzer cues, fall back to top-level cue_points
+    const analyzerCues = this.analysis?.analyzers?.[this.selectedAnalyzer]?.cues;
+    if (analyzerCues && analyzerCues.length > 0) {
+      return analyzerCues;
+    }
+    return this.analysis?.cue_points || [];
+  }
+
   get availableAnalyzers() {
     if (!this.analysis?.analyzers) return [];
     return Object.keys(this.analysis.analyzers);
@@ -348,7 +357,7 @@ class MixxApp extends LitElement {
       <div class="overview-container">
         <mixx-waveform-overview
           .beats=${this.currentBeats}
-          .cuePoints=${this.analysis?.cue_points || []}
+          .cuePoints=${this.currentCuePoints}
           .duration=${this.analysis?.duration || 0}
           .waveform=${this.analysis?.waveform || null}
           .zoom=${this.waveformZoom}
@@ -359,7 +368,7 @@ class MixxApp extends LitElement {
         <div class="waveform-container">
           <mixx-waveform
             .beats=${this.currentBeats}
-            .cuePoints=${this.analysis?.cue_points || []}
+            .cuePoints=${this.currentCuePoints}
             .duration=${this.analysis?.duration || 0}
             .waveform=${this.analysis?.waveform || null}
             @zoomchange=${this.handleZoomChange}

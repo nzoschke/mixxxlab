@@ -1,5 +1,5 @@
 // analyzer.h - C API for Mixxx beat detection
-// Wraps qm-dsp library for BPM and beat grid analysis
+// Wraps qm-dsp library for BPM, beat grid, downbeat, and segmentation analysis
 
 #ifndef MIXXX_ANALYZER_H
 #define MIXXX_ANALYZER_H
@@ -20,6 +20,21 @@ typedef enum {
     DF_TYPE_BROADBAND = 5   // Broadband Energy Rise
 } DFType;
 
+// AnalyzerSegmentation feature types
+typedef enum {
+    SEG_FEATURE_CONSTQ = 1,  // Constant-Q transform
+    SEG_FEATURE_CHROMA = 2,  // Chroma features
+    SEG_FEATURE_MFCC = 3     // MFCC features
+} AnalyzerSegmentFeatureType;
+
+// Cue point types
+typedef enum {
+    CUE_TYPE_DOWNBEAT = 1,   // First beat of a bar
+    CUE_TYPE_PHRASE = 2,     // Start of a phrase (e.g., every 8 bars)
+    CUE_TYPE_SECTION = 3,    // Section boundary (intro, verse, chorus, etc.)
+    CUE_TYPE_ENERGY = 4      // Energy change (drop, breakdown)
+} CueType;
+
 // Configuration for the analyzer
 typedef struct {
     int df_type;            // Detection function type (DFType enum)
@@ -31,9 +46,27 @@ typedef struct {
     int constrain_tempo;    // Constrain to input tempo (default: 0)
     double alpha;           // Beat tracking alpha (default: 0.9)
     double tightness;       // Beat tracking tightness (default: 4.0)
+    int beats_per_bar;      // Beats per bar for downbeat detection (default: 4)
 } AnalyzerConfig;
 
-// Analysis result structure
+// AnalyzerSegmenter configuration
+typedef struct {
+    int feature_type;       // AnalyzerSegmentFeatureType (default: CONSTQ)
+    double hop_size;        // Hop size in seconds (default: 0.2)
+    double window_size;     // Window size in seconds (default: 0.6)
+    int num_clusters;       // Number of segment types (default: 10)
+    int num_hmm_states;     // HMM states (default: 40)
+} AnalyzerSegmenterConfig;
+
+// A single cue point
+typedef struct {
+    double time;            // Time in seconds
+    int type;               // CueType
+    int type_index;         // Index within type (e.g., section type 0-9)
+    double confidence;      // Confidence score (0-1, if applicable)
+} CuePoint;
+
+// Analysis result structure (basic)
 typedef struct {
     double bpm;             // Detected BPM
     double* beats;          // Array of beat positions in seconds
@@ -44,7 +77,14 @@ typedef struct {
     char* error;            // Error message if analysis failed (NULL if success)
 } AnalyzerResult;
 
-// Extended result with two-stage process data
+// AnalyzerSegment info
+typedef struct {
+    double start;           // Start time in seconds
+    double end;             // End time in seconds
+    int type;               // AnalyzerSegment type (0 to num_clusters-1)
+} AnalyzerSegment;
+
+// Extended result with two-stage process data, downbeats, and segments
 typedef struct {
     // Basic results
     double bpm;
@@ -64,6 +104,21 @@ typedef struct {
     // Stage 2: Beat periods (tempo estimates per ~1.5s window)
     int* beat_periods;
     size_t bp_length;
+
+    // Downbeat detection
+    int* downbeats;         // Indices into beats array that are downbeats
+    size_t num_downbeats;
+    double* beat_spectral_diff; // Spectral difference at each beat
+    size_t bsd_length;
+
+    // AnalyzerSegmentation
+    AnalyzerSegment* segments;
+    size_t num_segments;
+    int num_segment_types;
+
+    // Cue points (derived from downbeats, phrases, segments)
+    CuePoint* cue_points;
+    size_t num_cue_points;
 } AnalyzerResultEx;
 
 // Opaque handle for streaming analyzer
@@ -71,6 +126,7 @@ typedef struct QMAnalyzer QMAnalyzer;
 
 // Get default configuration
 AnalyzerConfig analyzer_default_config(void);
+AnalyzerSegmenterConfig segmenter_default_config(void);
 
 // Analyze an audio file and return BPM and beat grid information
 // Returns NULL on failure, caller must free result with analyzer_free_result
@@ -79,8 +135,11 @@ AnalyzerResult* analyzer_analyze_file(const char* filepath);
 // Analyze with custom configuration
 AnalyzerResult* analyzer_analyze_file_config(const char* filepath, const AnalyzerConfig* config);
 
-// Analyze and return extended results including detection function and beat periods
-AnalyzerResultEx* analyzer_analyze_file_ex(const char* filepath, const AnalyzerConfig* config);
+// Analyze and return extended results including detection function, beat periods,
+// downbeats, and segments
+AnalyzerResultEx* analyzer_analyze_file_ex(const char* filepath,
+                                           const AnalyzerConfig* config,
+                                           const AnalyzerSegmenterConfig* seg_config);
 
 // Free the analysis result
 void analyzer_free_result(AnalyzerResult* result);
@@ -101,8 +160,9 @@ QMAnalyzer* analyzer_create(int sample_rate, int channels, const AnalyzerConfig*
 int analyzer_process(QMAnalyzer* analyzer, const float* samples, size_t num_frames);
 
 // Finalize analysis and get results
+// seg_config: optional segmenter config (NULL to skip segmentation)
 // Returns extended results, caller must free with analyzer_free_result_ex
-AnalyzerResultEx* analyzer_finalize(QMAnalyzer* analyzer);
+AnalyzerResultEx* analyzer_finalize(QMAnalyzer* analyzer, const AnalyzerSegmenterConfig* seg_config);
 
 // Destroy the streaming analyzer
 void analyzer_destroy(QMAnalyzer* analyzer);

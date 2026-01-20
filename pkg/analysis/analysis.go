@@ -20,6 +20,13 @@ type TrackAnalysis struct {
 	Waveform   *Waveform            `json:"waveform,omitempty"`
 }
 
+// Segment represents a structural segment of a track.
+type Segment struct {
+	Start float64 `json:"start"` // Start time in seconds
+	End   float64 `json:"end"`   // End time in seconds
+	Type  int     `json:"type"`  // Segment type (0 to num_clusters-1)
+}
+
 // Analysis represents beat detection results from a single analyzer.
 type Analysis struct {
 	BPM   float64   `json:"bpm"`
@@ -31,6 +38,12 @@ type Analysis struct {
 	BeatPeriods       []int     `json:"beat_periods,omitempty"`       // Stage 2: tempo per window
 	StepSizeFrames    int       `json:"step_size_frames,omitempty"`   // DF frame step in samples
 	WindowSize        int       `json:"window_size,omitempty"`        // FFT window size
+
+	// Downbeat and structural analysis (optional)
+	Downbeats       []int      `json:"downbeats,omitempty"`        // Indices into Beats that are downbeats
+	Segments        []Segment  `json:"segments,omitempty"`         // Structural segments
+	NumSegmentTypes int        `json:"num_segment_types,omitempty"` // Number of distinct segment types
+	Cues            []CuePoint `json:"cues,omitempty"`             // Detected cue points
 }
 
 // Waveform contains downsampled waveform data for visualization.
@@ -106,14 +119,48 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 		}
 	}
 
-	// Run qm-dsp-extended analyzer (CGO) - full two-stage Mixxx process
-	if qmExResult, err := AnalyzeFileQM(audioPath); err != nil {
+	// Run qm-dsp-extended analyzer (CGO) - full two-stage Mixxx process with segmentation
+	segConfig := DefaultSegmenterConfig()
+	if qmExResult, err := AnalyzeFileQMFull(audioPath, nil, &segConfig); err != nil {
 		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{Error: err.Error()}
 	} else {
 		if result.Duration == 0 {
 			result.Duration = qmExResult.Duration
 			result.SampleRate = qmExResult.SampleRate
 		}
+
+		// Convert segments from QM format
+		var segments []Segment
+		for _, seg := range qmExResult.Segments {
+			segments = append(segments, Segment{
+				Start: seg.Start,
+				End:   seg.End,
+				Type:  seg.Type,
+			})
+		}
+
+		// Convert cues from QM format
+		var cues []CuePoint
+		for _, cue := range qmExResult.Cues {
+			cueType := "unknown"
+			switch cue.Type {
+			case CueTypeDownbeat:
+				cueType = "downbeat"
+			case CueTypePhrase:
+				cueType = "phrase"
+			case CueTypeSection:
+				cueType = "section"
+			case CueTypeEnergy:
+				cueType = "energy"
+			}
+			cues = append(cues, CuePoint{
+				Time:       cue.Time,
+				Type:       cueType,
+				Confidence: cue.Confidence,
+				Name:       fmt.Sprintf("%s-%d", cueType, cue.TypeIndex),
+			})
+		}
+
 		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{
 			BPM:               qmExResult.BPM,
 			Beats:             qmExResult.Beats,
@@ -121,6 +168,10 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 			BeatPeriods:       qmExResult.BeatPeriods,
 			StepSizeFrames:    qmExResult.StepSizeFrames,
 			WindowSize:        qmExResult.WindowSize,
+			Downbeats:         qmExResult.Downbeats,
+			Segments:          segments,
+			NumSegmentTypes:   qmExResult.NumSegmentTypes,
+			Cues:              cues,
 		}
 	}
 

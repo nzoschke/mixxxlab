@@ -34,6 +34,32 @@ const (
 	DFTypeBroadband DetectionFunctionType = C.DF_TYPE_BROADBAND
 )
 
+// SegmentFeatureType specifies the feature extraction method for segmentation.
+type SegmentFeatureType int
+
+const (
+	// SegFeatureConstQ uses Constant-Q transform features.
+	SegFeatureConstQ SegmentFeatureType = C.SEG_FEATURE_CONSTQ
+	// SegFeatureChroma uses Chroma features.
+	SegFeatureChroma SegmentFeatureType = C.SEG_FEATURE_CHROMA
+	// SegFeatureMFCC uses MFCC features.
+	SegFeatureMFCC SegmentFeatureType = C.SEG_FEATURE_MFCC
+)
+
+// QMCueType specifies the type of cue point.
+type QMCueType int
+
+const (
+	// CueTypeDownbeat marks the first beat of a bar.
+	CueTypeDownbeat QMCueType = C.CUE_TYPE_DOWNBEAT
+	// CueTypePhrase marks the start of a phrase (e.g., every 8 bars).
+	CueTypePhrase QMCueType = C.CUE_TYPE_PHRASE
+	// CueTypeSection marks a section boundary (intro, verse, chorus, etc.).
+	CueTypeSection QMCueType = C.CUE_TYPE_SECTION
+	// CueTypeEnergy marks an energy change (drop, breakdown).
+	CueTypeEnergy QMCueType = C.CUE_TYPE_ENERGY
+)
+
 // QMConfig holds configuration for the QM-DSP beat analyzer.
 type QMConfig struct {
 	// DFType specifies the detection function type.
@@ -71,6 +97,70 @@ type QMConfig struct {
 	// Tightness controls how strictly beats follow the tempo.
 	// Higher values = stricter. Default: 4.0
 	Tightness float64
+
+	// BeatsPerBar for downbeat detection.
+	// Default: 4
+	BeatsPerBar int
+}
+
+// SegmenterConfig holds configuration for structural segmentation.
+type SegmenterConfig struct {
+	// FeatureType specifies the feature extraction method.
+	// Default: SegFeatureConstQ
+	FeatureType SegmentFeatureType
+
+	// HopSize is the analysis hop size in seconds.
+	// Default: 0.2
+	HopSize float64
+
+	// WindowSize is the analysis window size in seconds.
+	// Default: 0.6
+	WindowSize float64
+
+	// NumClusters is the number of segment types to detect.
+	// Default: 10
+	NumClusters int
+
+	// NumHMMStates is the number of HMM states.
+	// Default: 40
+	NumHMMStates int
+}
+
+// DefaultSegmenterConfig returns the default segmenter configuration.
+func DefaultSegmenterConfig() SegmenterConfig {
+	cCfg := C.segmenter_default_config()
+	return SegmenterConfig{
+		FeatureType:  SegmentFeatureType(cCfg.feature_type),
+		HopSize:      float64(cCfg.hop_size),
+		WindowSize:   float64(cCfg.window_size),
+		NumClusters:  int(cCfg.num_clusters),
+		NumHMMStates: int(cCfg.num_hmm_states),
+	}
+}
+
+func (cfg SegmenterConfig) toC() C.AnalyzerSegmenterConfig {
+	var cCfg C.AnalyzerSegmenterConfig
+	cCfg.feature_type = C.int(cfg.FeatureType)
+	cCfg.hop_size = C.double(cfg.HopSize)
+	cCfg.window_size = C.double(cfg.WindowSize)
+	cCfg.num_clusters = C.int(cfg.NumClusters)
+	cCfg.num_hmm_states = C.int(cfg.NumHMMStates)
+	return cCfg
+}
+
+// QMSegment represents a detected structural segment.
+type QMSegment struct {
+	Start float64 // Start time in seconds
+	End   float64 // End time in seconds
+	Type  int     // Segment type (0 to NumClusters-1)
+}
+
+// QMCue represents a detected cue point.
+type QMCue struct {
+	Time       float64   // Time in seconds
+	Type       QMCueType // Cue type
+	TypeIndex  int       // Index within type (e.g., section type 0-9)
+	Confidence float64   // Confidence score (0-1)
 }
 
 // DefaultQMConfig returns the default configuration matching Mixxx defaults.
@@ -86,6 +176,7 @@ func DefaultQMConfig() QMConfig {
 		ConstrainTempo:    cCfg.constrain_tempo != 0,
 		Alpha:             float64(cCfg.alpha),
 		Tightness:         float64(cCfg.tightness),
+		BeatsPerBar:       int(cCfg.beats_per_bar),
 	}
 }
 
@@ -104,6 +195,7 @@ func (cfg QMConfig) toC() C.AnalyzerConfig {
 	}
 	cCfg.alpha = C.double(cfg.Alpha)
 	cCfg.tightness = C.double(cfg.Tightness)
+	cCfg.beats_per_bar = C.int(cfg.BeatsPerBar)
 	return cCfg
 }
 
@@ -124,6 +216,18 @@ type QMResult struct {
 	// Stage 2: Beat periods (tempo estimates per ~1.5s window)
 	// Each value represents the estimated beat period in DF frame units
 	BeatPeriods []int
+
+	// Downbeat detection
+	Downbeats          []int     // Indices into Beats array that are downbeats (first beat of bar)
+	BeatSpectralDiff   []float64 // Spectral difference at each beat (for downbeat analysis)
+	NumDownbeats       int       // Number of downbeats detected
+
+	// Segmentation
+	Segments        []QMSegment // Structural segments
+	NumSegmentTypes int         // Number of distinct segment types
+
+	// Cue points (derived from downbeats, phrases, segments)
+	Cues []QMCue
 }
 
 // Bars returns the number of bars (assuming 4 beats per bar).
@@ -230,13 +334,20 @@ func (a *QMAnalyzer) DetectionFunctionCount() int {
 }
 
 // Finalize completes analysis and returns results.
+// segConfig is optional - pass nil to skip segmentation.
 // After calling Finalize, the analyzer should be closed.
-func (a *QMAnalyzer) Finalize() (*QMResult, error) {
+func (a *QMAnalyzer) Finalize(segConfig *SegmenterConfig) (*QMResult, error) {
 	if a.handle == nil {
 		return nil, errors.New("analyzer not initialized")
 	}
 
-	cResult := C.analyzer_finalize(a.handle)
+	var cSegCfg *C.AnalyzerSegmenterConfig
+	if segConfig != nil {
+		c := segConfig.toC()
+		cSegCfg = &c
+	}
+
+	cResult := C.analyzer_finalize(a.handle, cSegCfg)
 	if cResult == nil {
 		return nil, errors.New("finalization returned nil")
 	}
@@ -285,6 +396,57 @@ func (a *QMAnalyzer) Finalize() (*QMResult, error) {
 		}
 	}
 
+	// Copy downbeat data
+	if cResult.num_downbeats > 0 && cResult.downbeats != nil {
+		numDb := int(cResult.num_downbeats)
+		result.Downbeats = make([]int, numDb)
+		result.NumDownbeats = numDb
+		dbSlice := unsafe.Slice(cResult.downbeats, numDb)
+		for i := 0; i < numDb; i++ {
+			result.Downbeats[i] = int(dbSlice[i])
+		}
+	}
+
+	// Copy beat spectral difference
+	if cResult.bsd_length > 0 && cResult.beat_spectral_diff != nil {
+		bsdLen := int(cResult.bsd_length)
+		result.BeatSpectralDiff = make([]float64, bsdLen)
+		bsdSlice := unsafe.Slice(cResult.beat_spectral_diff, bsdLen)
+		for i := 0; i < bsdLen; i++ {
+			result.BeatSpectralDiff[i] = float64(bsdSlice[i])
+		}
+	}
+
+	// Copy segments
+	if cResult.num_segments > 0 && cResult.segments != nil {
+		numSeg := int(cResult.num_segments)
+		result.Segments = make([]QMSegment, numSeg)
+		result.NumSegmentTypes = int(cResult.num_segment_types)
+		segSlice := unsafe.Slice(cResult.segments, numSeg)
+		for i := 0; i < numSeg; i++ {
+			result.Segments[i] = QMSegment{
+				Start: float64(segSlice[i].start),
+				End:   float64(segSlice[i].end),
+				Type:  int(segSlice[i]._type),
+			}
+		}
+	}
+
+	// Copy cue points
+	if cResult.num_cue_points > 0 && cResult.cue_points != nil {
+		numCues := int(cResult.num_cue_points)
+		result.Cues = make([]QMCue, numCues)
+		cueSlice := unsafe.Slice(cResult.cue_points, numCues)
+		for i := 0; i < numCues; i++ {
+			result.Cues[i] = QMCue{
+				Time:       float64(cueSlice[i].time),
+				Type:       QMCueType(cueSlice[i]._type),
+				TypeIndex:  int(cueSlice[i].type_index),
+				Confidence: float64(cueSlice[i].confidence),
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -298,11 +460,16 @@ func (a *QMAnalyzer) Close() {
 
 // AnalyzeFileQM analyzes an audio file using QM-DSP with default configuration.
 func AnalyzeFileQM(filepath string) (*QMResult, error) {
-	return AnalyzeFileQMConfig(filepath, nil)
+	return AnalyzeFileQMFull(filepath, nil, nil)
 }
 
 // AnalyzeFileQMConfig analyzes an audio file using QM-DSP with custom configuration.
 func AnalyzeFileQMConfig(filepath string, config *QMConfig) (*QMResult, error) {
+	return AnalyzeFileQMFull(filepath, config, nil)
+}
+
+// AnalyzeFileQMFull analyzes an audio file with full config including segmentation.
+func AnalyzeFileQMFull(filepath string, config *QMConfig, segConfig *SegmenterConfig) (*QMResult, error) {
 	cpath := C.CString(filepath)
 	defer C.free(unsafe.Pointer(cpath))
 
@@ -312,7 +479,13 @@ func AnalyzeFileQMConfig(filepath string, config *QMConfig) (*QMResult, error) {
 		cCfg = &c
 	}
 
-	cResult := C.analyzer_analyze_file_ex(cpath, cCfg)
+	var cSegCfg *C.AnalyzerSegmenterConfig
+	if segConfig != nil {
+		c := segConfig.toC()
+		cSegCfg = &c
+	}
+
+	cResult := C.analyzer_analyze_file_ex(cpath, cCfg, cSegCfg)
 	if cResult == nil {
 		return nil, errors.New("analyzer returned nil result")
 	}
@@ -358,6 +531,57 @@ func AnalyzeFileQMConfig(filepath string, config *QMConfig) (*QMResult, error) {
 		bpSlice := unsafe.Slice(cResult.beat_periods, bpLen)
 		for i := 0; i < bpLen; i++ {
 			result.BeatPeriods[i] = int(bpSlice[i])
+		}
+	}
+
+	// Copy downbeat data
+	if cResult.num_downbeats > 0 && cResult.downbeats != nil {
+		numDb := int(cResult.num_downbeats)
+		result.Downbeats = make([]int, numDb)
+		result.NumDownbeats = numDb
+		dbSlice := unsafe.Slice(cResult.downbeats, numDb)
+		for i := 0; i < numDb; i++ {
+			result.Downbeats[i] = int(dbSlice[i])
+		}
+	}
+
+	// Copy beat spectral difference
+	if cResult.bsd_length > 0 && cResult.beat_spectral_diff != nil {
+		bsdLen := int(cResult.bsd_length)
+		result.BeatSpectralDiff = make([]float64, bsdLen)
+		bsdSlice := unsafe.Slice(cResult.beat_spectral_diff, bsdLen)
+		for i := 0; i < bsdLen; i++ {
+			result.BeatSpectralDiff[i] = float64(bsdSlice[i])
+		}
+	}
+
+	// Copy segments
+	if cResult.num_segments > 0 && cResult.segments != nil {
+		numSeg := int(cResult.num_segments)
+		result.Segments = make([]QMSegment, numSeg)
+		result.NumSegmentTypes = int(cResult.num_segment_types)
+		segSlice := unsafe.Slice(cResult.segments, numSeg)
+		for i := 0; i < numSeg; i++ {
+			result.Segments[i] = QMSegment{
+				Start: float64(segSlice[i].start),
+				End:   float64(segSlice[i].end),
+				Type:  int(segSlice[i]._type),
+			}
+		}
+	}
+
+	// Copy cue points
+	if cResult.num_cue_points > 0 && cResult.cue_points != nil {
+		numCues := int(cResult.num_cue_points)
+		result.Cues = make([]QMCue, numCues)
+		cueSlice := unsafe.Slice(cResult.cue_points, numCues)
+		for i := 0; i < numCues; i++ {
+			result.Cues[i] = QMCue{
+				Time:       float64(cueSlice[i].time),
+				Type:       QMCueType(cueSlice[i]._type),
+				TypeIndex:  int(cueSlice[i].type_index),
+				Confidence: float64(cueSlice[i].confidence),
+			}
 		}
 	}
 

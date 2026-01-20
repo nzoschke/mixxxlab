@@ -49,12 +49,17 @@ class MixxWaveform extends LitElement {
 
   // Cue point type colors
   static CUE_COLORS = {
+    // Python ML cue types
     intro: '#00ff00',      // Green
     drop: '#ff0000',       // Red
     breakdown: '#0088ff',  // Blue
     buildup: '#ffaa00',    // Orange
     outro: '#ff00ff',      // Magenta
+    // QM-DSP cue types
+    downbeat: '#00ffcc',   // Cyan
+    phrase: '#ff6600',     // Orange-red
     section: '#ffff00',    // Yellow
+    energy: '#ff0066',     // Hot pink
   };
 
   connectedCallback() {
