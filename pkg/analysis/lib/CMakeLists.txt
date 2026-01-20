@@ -10,7 +10,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SNDFILE REQUIRED sndfile)
 
 # qm-dsp source files (subset needed for beat detection)
-set(QMDSP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../mixxx/lib/qm-dsp")
+# The mixxx submodule is at the repo root level
+set(QMDSP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../mixxx/lib/qm-dsp")
 
 set(QMDSP_SOURCES
     ${QMDSP_DIR}/dsp/onsets/DetectionFunction.cpp

@@ -1,8 +1,9 @@
 import { LitElement, html, css } from 'https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js';
-import './audio-player.js';
+import { AudioEngine } from './audio-engine.js';
 import './waveform.js';
 import './beat-grid.js';
 import './visualizer.js';
+import './realtime-visualizer.js';
 
 class MixxApp extends LitElement {
   static properties = {
@@ -11,6 +12,8 @@ class MixxApp extends LitElement {
     analysis: { type: Object },
     loading: { type: Boolean },
     selectedAnalyzer: { type: String },
+    waveformZoom: { type: Number },
+    audioEngine: { type: Object },
   };
 
   static styles = css`
@@ -22,15 +25,19 @@ class MixxApp extends LitElement {
     }
 
     header {
-      padding: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
       background: var(--bg-secondary);
       border-bottom: 1px solid var(--bg-tertiary);
+      flex-shrink: 0;
     }
 
     h1 {
-      font-size: 1.5rem;
+      font-size: 1.25rem;
       font-weight: 600;
-      margin-bottom: 0.5rem;
+      margin: 0;
     }
 
     .content {
@@ -86,42 +93,63 @@ class MixxApp extends LitElement {
       flex: 1;
       display: flex;
       flex-direction: column;
-      padding: 1rem;
-      gap: 1rem;
+      padding: 0.75rem;
+      gap: 0.75rem;
       overflow: hidden;
+      min-height: 0;
     }
 
     .visualizer-row {
       display: flex;
-      gap: 1rem;
-      min-height: 150px;
+      gap: 0.75rem;
+      height: 120px;
+      min-height: 120px;
+      max-height: 120px;
     }
 
     .waveform-container {
       flex: 1;
+      height: 100%;
       background: var(--waveform-bg);
-      border-radius: 8px;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .overview-container {
+      height: 40px;
+      flex-shrink: 0;
+      background: var(--waveform-bg);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .realtime-container {
+      height: 60px;
+      flex-shrink: 0;
+      background: var(--waveform-bg);
+      border-radius: 6px;
       overflow: hidden;
     }
 
     .beat-indicator {
       width: 200px;
+      height: 120px;
+      overflow: hidden;
     }
 
     .analyzer-selector {
       display: flex;
       gap: 0.5rem;
-      margin-bottom: 0.5rem;
     }
 
     .analyzer-btn {
-      padding: 0.5rem 1rem;
+      padding: 0.4rem 0.75rem;
       background: var(--bg-tertiary);
       border: none;
       border-radius: 4px;
       color: var(--text-primary);
       cursor: pointer;
-      font-size: 0.85rem;
+      font-size: 0.8rem;
     }
 
     .analyzer-btn.active {
@@ -161,12 +189,42 @@ class MixxApp extends LitElement {
     this.currentTrack = null;
     this.analysis = null;
     this.loading = true;
-    this.selectedAnalyzer = 'ml-python';
+    this.selectedAnalyzer = 'qm-dsp-extended';
+    this.waveformZoom = 1;
+    this.audioEngine = null;
+  }
+
+  handleAudioReady(e) {
+    this.audioEngine = e.detail.engine;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this.fetchTracks();
+
+    // Global keyboard shortcuts
+    this.handleKeyDown = (e) => {
+      if (e.code === 'Space' && e.target.tagName !== 'INPUT') {
+        e.preventDefault();
+        this.togglePlayPause();
+      }
+    };
+    window.addEventListener('keydown', this.handleKeyDown);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('keydown', this.handleKeyDown);
+  }
+
+  togglePlayPause() {
+    if (this.audioEngine) {
+      if (this.audioEngine.paused) {
+        this.audioEngine.play();
+      } else {
+        this.audioEngine.pause();
+      }
+    }
   }
 
   async fetchTracks() {
@@ -183,6 +241,7 @@ class MixxApp extends LitElement {
   async selectTrack(track) {
     this.currentTrack = track;
     this.analysis = null;
+    this.waveformZoom = 1; // Reset zoom on track change
 
     if (track.has_json) {
       try {
@@ -204,6 +263,10 @@ class MixxApp extends LitElement {
 
   selectAnalyzer(name) {
     this.selectedAnalyzer = name;
+  }
+
+  handleZoomChange(e) {
+    this.waveformZoom = e.detail.zoom;
   }
 
   get currentBeats() {
@@ -229,6 +292,25 @@ class MixxApp extends LitElement {
     return html`
       <header>
         <h1>Beat Grid Visualizer</h1>
+        ${this.analysis ? html`
+          <div class="analyzer-selector">
+            ${this.availableAnalyzers.map(name => {
+              const a = this.analysis.analyzers[name];
+              const hasError = a.error;
+              return html`
+                <button
+                  class="analyzer-btn ${name === this.selectedAnalyzer ? 'active' : ''}"
+                  ?disabled=${hasError}
+                  @click=${() => this.selectAnalyzer(name)}
+                  title=${hasError ? a.error : `${a.bpm?.toFixed(1)} BPM, ${a.beats?.length} beats`}
+                >
+                  ${name}
+                  ${hasError ? ' (error)' : ` (${a.bpm?.toFixed(0)})`}
+                </button>
+              `;
+            })}
+          </div>
+        ` : ''}
       </header>
       <div class="content">
         <aside class="sidebar">
@@ -263,32 +345,24 @@ class MixxApp extends LitElement {
 
   renderPlayer() {
     return html`
-      ${this.analysis ? html`
-        <div class="analyzer-selector">
-          ${this.availableAnalyzers.map(name => {
-            const a = this.analysis.analyzers[name];
-            const hasError = a.error;
-            return html`
-              <button
-                class="analyzer-btn ${name === this.selectedAnalyzer ? 'active' : ''}"
-                ?disabled=${hasError}
-                @click=${() => this.selectAnalyzer(name)}
-                title=${hasError ? a.error : `${a.bpm?.toFixed(1)} BPM, ${a.beats?.length} beats`}
-              >
-                ${name}
-                ${hasError ? ' (error)' : ` (${a.bpm?.toFixed(0)})`}
-              </button>
-            `;
-          })}
-        </div>
-      ` : ''}
+      <div class="overview-container">
+        <mixx-waveform-overview
+          .beats=${this.currentBeats}
+          .cuePoints=${this.analysis?.cue_points || []}
+          .duration=${this.analysis?.duration || 0}
+          .waveform=${this.analysis?.waveform || null}
+          .zoom=${this.waveformZoom}
+        ></mixx-waveform-overview>
+      </div>
 
       <div class="visualizer-row">
         <div class="waveform-container">
           <mixx-waveform
             .beats=${this.currentBeats}
+            .cuePoints=${this.analysis?.cue_points || []}
             .duration=${this.analysis?.duration || 0}
             .waveform=${this.analysis?.waveform || null}
+            @zoomchange=${this.handleZoomChange}
           ></mixx-waveform>
         </div>
         <div class="beat-indicator">
@@ -299,10 +373,17 @@ class MixxApp extends LitElement {
         </div>
       </div>
 
+      <div class="realtime-container">
+        <mixx-realtime-visualizer
+          .audioEngine=${this.audioEngine}
+        ></mixx-realtime-visualizer>
+      </div>
+
       <mixx-transport
         .track=${this.currentTrack}
         .duration=${this.analysis?.duration || 0}
         .bpm=${this.currentBPM}
+        @audioready=${this.handleAudioReady}
       ></mixx-transport>
     `;
   }
@@ -310,7 +391,7 @@ class MixxApp extends LitElement {
 
 customElements.define('mixx-app', MixxApp);
 
-// Transport component
+// Transport component - uses AudioEngine for sample-accurate playback
 class MixxTransport extends LitElement {
   static properties = {
     track: { type: Object },
@@ -318,6 +399,7 @@ class MixxTransport extends LitElement {
     bpm: { type: Number },
     playing: { type: Boolean },
     currentTime: { type: Number },
+    loading: { type: Boolean },
   };
 
   static styles = css`
@@ -326,6 +408,7 @@ class MixxTransport extends LitElement {
       background: var(--bg-secondary);
       border-radius: 8px;
       padding: 1rem;
+      flex-shrink: 0;
     }
 
     .controls {
@@ -352,6 +435,11 @@ class MixxTransport extends LitElement {
       filter: brightness(1.1);
     }
 
+    .play-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     .time {
       font-family: monospace;
       font-size: 1rem;
@@ -371,8 +459,9 @@ class MixxTransport extends LitElement {
       font-weight: 600;
     }
 
-    audio {
-      display: none;
+    .loading-indicator {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
     }
   `;
 
@@ -380,7 +469,76 @@ class MixxTransport extends LitElement {
     super();
     this.playing = false;
     this.currentTime = 0;
-    this.audioEl = null;
+    this.loading = false;
+    this.engine = null;
+    this.rafId = null;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+
+    // Create engine instance
+    this.engine = new AudioEngine();
+
+    // Listen for engine events
+    this.engine.addEventListener('play', () => {
+      this.playing = true;
+      this.startTimeLoop();
+    });
+
+    this.engine.addEventListener('pause', () => {
+      this.playing = false;
+      this.stopTimeLoop();
+    });
+
+    this.engine.addEventListener('ended', () => {
+      this.playing = false;
+      this.currentTime = 0;
+      this.stopTimeLoop();
+      this.broadcastTime();
+    });
+
+    this.engine.addEventListener('loadstart', () => {
+      this.loading = true;
+    });
+
+    this.engine.addEventListener('canplay', () => {
+      this.loading = false;
+    });
+
+    this.engine.addEventListener('error', (e) => {
+      this.loading = false;
+      console.error('Audio engine error:', e.detail?.error);
+    });
+
+    this.engine.addEventListener('seeked', () => {
+      this.broadcastTime();
+    });
+
+    // Listen for seek events from waveform
+    this._seekHandler = (e) => {
+      if (e.detail?.time !== undefined && this.engine) {
+        this.engine.seek(e.detail.time);
+      }
+    };
+    window.addEventListener('seek', this._seekHandler);
+
+    // Notify parent that engine is ready
+    this.dispatchEvent(new CustomEvent('audioready', {
+      detail: { engine: this.engine },
+      bubbles: true,
+      composed: true
+    }));
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.stopTimeLoop();
+    window.removeEventListener('seek', this._seekHandler);
+    if (this.engine) {
+      this.engine.dispose();
+      this.engine = null;
+    }
   }
 
   updated(changed) {
@@ -389,47 +547,53 @@ class MixxTransport extends LitElement {
     }
   }
 
-  loadTrack() {
+  async loadTrack() {
     this.playing = false;
     this.currentTime = 0;
 
-    if (this.audioEl) {
-      this.audioEl.pause();
-      this.audioEl.src = `/api/music/${this.track.path}`;
-      this.audioEl.load();
+    if (this.engine && this.track) {
+      try {
+        await this.engine.load(`/api/music/${this.track.path}`);
+      } catch (e) {
+        console.error('Failed to load track:', e);
+      }
     }
   }
 
-  firstUpdated() {
-    this.audioEl = this.renderRoot.querySelector('audio');
-    this.audioEl.addEventListener('timeupdate', () => {
-      this.currentTime = this.audioEl.currentTime;
-      // Dispatch event for other components
-      this.dispatchEvent(new CustomEvent('timeupdate', {
-        detail: { time: this.currentTime },
-        bubbles: true,
-        composed: true
-      }));
-    });
-    this.audioEl.addEventListener('ended', () => {
-      this.playing = false;
-    });
+  broadcastTime() {
+    if (this.engine) {
+      this.currentTime = this.engine.getCurrentTime();
+    }
+    window.dispatchEvent(new CustomEvent('timeupdate', {
+      detail: { time: this.currentTime }
+    }));
+  }
 
-    // Listen for seek events from waveform
-    window.addEventListener('seek', (e) => {
-      if (e.detail?.time !== undefined && this.audioEl) {
-        this.audioEl.currentTime = e.detail.time;
+  startTimeLoop() {
+    const update = () => {
+      if (this.playing) {
+        this.broadcastTime();
+        this.rafId = requestAnimationFrame(update);
       }
-    });
+    };
+    this.rafId = requestAnimationFrame(update);
+  }
+
+  stopTimeLoop() {
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
   }
 
   togglePlay() {
-    if (this.playing) {
-      this.audioEl.pause();
+    if (!this.engine) return;
+
+    if (this.engine.paused) {
+      this.engine.play();
     } else {
-      this.audioEl.play();
+      this.engine.pause();
     }
-    this.playing = !this.playing;
   }
 
   formatTime(seconds) {
@@ -440,13 +604,13 @@ class MixxTransport extends LitElement {
 
   render() {
     return html`
-      <audio></audio>
       <div class="controls">
-        <button class="play-btn" @click=${this.togglePlay}>
-          ${this.playing ? '⏸' : '▶'}
+        <button class="play-btn" @click=${this.togglePlay} ?disabled=${this.loading}>
+          ${this.loading ? '...' : (this.playing ? '⏸' : '▶')}
         </button>
         <span class="time">
           ${this.formatTime(this.currentTime)} / ${this.formatTime(this.duration)}
+          ${this.loading ? html`<span class="loading-indicator">(loading...)</span>` : ''}
         </span>
         <div class="info">
           <div class="bpm">${this.bpm?.toFixed(1) || '—'} BPM</div>

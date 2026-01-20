@@ -1,5 +1,8 @@
-// Package analyzer provides Go bindings for Mixxx beat detection.
+// Package analysis provides Go bindings for Mixxx beat detection.
 // It wraps the qm-dsp library (Queen Mary DSP) for BPM and beat grid analysis.
+//
+// This file provides backwards-compatible API. For the full two-stage API,
+// see qm_analyzer.go which exposes detection function values and beat periods.
 package analysis
 
 /*
@@ -18,13 +21,14 @@ import (
 )
 
 // AnalyzeOut contains the analysis results from beat detection.
+// For extended results including detection function and beat periods,
+// use AnalyzeFileQM or QMAnalyzer instead.
 type AnalyzeOut struct {
 	BPM         float64   // BPM is the detected tempo in beats per minute.
 	Beats       []float64 // Beats contains the timestamps of detected beats in seconds.
 	SampleRate  int       // SampleRate is the sample rate of the audio file in Hz.
 	TotalFrames int64     // TotalFrames is the total number of audio frames in the file.
 	Duration    float64   // Duration is the total duration of the audio file in seconds.
-
 }
 
 // Bars returns the number of bars (4 beats per bar) in the track.
@@ -37,6 +41,9 @@ func (r *AnalyzeOut) Bars() float64 {
 
 // AnalyzeFile analyzes an audio file and returns BPM and beat grid information.
 // Supported formats include FLAC, WAV, AIFF, OGG, and MP3 (via libsndfile).
+//
+// For extended results including the detection function and beat periods,
+// use AnalyzeFileQM instead.
 func AnalyzeFile(filepath string) (*AnalyzeOut, error) {
 	cpath := C.CString(filepath)
 	defer C.free(unsafe.Pointer(cpath))

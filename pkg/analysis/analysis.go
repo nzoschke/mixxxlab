@@ -16,6 +16,7 @@ type TrackAnalysis struct {
 	Duration   float64              `json:"duration"`
 	SampleRate int                  `json:"sample_rate"`
 	Analyzers  map[string]*Analysis `json:"analyzers"`
+	CuePoints  []CuePoint           `json:"cue_points,omitempty"`
 	Waveform   *Waveform            `json:"waveform,omitempty"`
 }
 
@@ -24,6 +25,12 @@ type Analysis struct {
 	BPM   float64   `json:"bpm"`
 	Beats []float64 `json:"beats"`
 	Error string    `json:"error,omitempty"`
+
+	// Extended data from QM-DSP two-stage process (optional)
+	DetectionFunction []float64 `json:"detection_function,omitempty"` // Stage 1: onset strength
+	BeatPeriods       []int     `json:"beat_periods,omitempty"`       // Stage 2: tempo per window
+	StepSizeFrames    int       `json:"step_size_frames,omitempty"`   // DF frame step in samples
+	WindowSize        int       `json:"window_size,omitempty"`        // FFT window size
 }
 
 // Waveform contains downsampled waveform data for visualization.
@@ -37,15 +44,17 @@ type Waveform struct {
 type AnalyzerType string
 
 const (
-	AnalyzerQMDSP      AnalyzerType = "qm-dsp"     // CGO qm-dsp library
-	AnalyzerMLPython   AnalyzerType = "ml-python"  // Python ML subprocess
-	AnalyzerTensorFlow AnalyzerType = "tensorflow" // TensorFlow Go bindings
+	AnalyzerQMDSP      AnalyzerType = "qm-dsp"          // CGO qm-dsp library (basic)
+	AnalyzerQMDSPEx    AnalyzerType = "qm-dsp-extended" // CGO qm-dsp with two-stage process data
+	AnalyzerMLPython   AnalyzerType = "ml-python"       // Python ML subprocess
+	AnalyzerTensorFlow AnalyzerType = "tensorflow"      // TensorFlow Go bindings
 )
 
 // Analyzer wraps multiple beat analyzers for comparison.
 type Analyzer struct {
 	mlPython *MLAnalyzer
 	tfGo     *TFAnalyzer
+	cue      *CueAnalyzer
 }
 
 // New creates a new Analyzer with all available implementations.
@@ -60,6 +69,11 @@ func New() (*Analyzer, error) {
 	// Try to initialize TensorFlow Go analyzer
 	if tf, err := NewTFAnalyzer(); err == nil {
 		a.tfGo = tf
+	}
+
+	// Try to initialize Cue analyzer
+	if cue, err := NewCueAnalyzer(); err == nil {
+		a.cue = cue
 	}
 
 	return a, nil
@@ -80,7 +94,7 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 		Analyzers: make(map[string]*Analysis),
 	}
 
-	// Run qm-dsp analyzer (CGO)
+	// Run qm-dsp analyzer (CGO) - basic output
 	if qmResult, err := AnalyzeFile(audioPath); err != nil {
 		result.Analyzers[string(AnalyzerQMDSP)] = &Analysis{Error: err.Error()}
 	} else {
@@ -89,6 +103,24 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 		result.Analyzers[string(AnalyzerQMDSP)] = &Analysis{
 			BPM:   qmResult.BPM,
 			Beats: qmResult.Beats,
+		}
+	}
+
+	// Run qm-dsp-extended analyzer (CGO) - full two-stage Mixxx process
+	if qmExResult, err := AnalyzeFileQM(audioPath); err != nil {
+		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{Error: err.Error()}
+	} else {
+		if result.Duration == 0 {
+			result.Duration = qmExResult.Duration
+			result.SampleRate = qmExResult.SampleRate
+		}
+		result.Analyzers[string(AnalyzerQMDSPEx)] = &Analysis{
+			BPM:               qmExResult.BPM,
+			Beats:             qmExResult.Beats,
+			DetectionFunction: qmExResult.DetectionFunction,
+			BeatPeriods:       qmExResult.BeatPeriods,
+			StepSizeFrames:    qmExResult.StepSizeFrames,
+			WindowSize:        qmExResult.WindowSize,
 		}
 	}
 
@@ -134,6 +166,15 @@ func (a *Analyzer) AnalyzeFileWithPath(audioPath string) (*TrackAnalysis, error)
 		fmt.Printf("  Warning: could not generate waveform: %v\n", err)
 	} else {
 		result.Waveform = waveform
+	}
+
+	// Detect cue points
+	if a.cue != nil {
+		if cueResult, err := a.cue.AnalyzeFile(audioPath, 8, 8.0); err != nil {
+			fmt.Printf("  Warning: could not detect cue points: %v\n", err)
+		} else {
+			result.CuePoints = cueResult.CuePoints
+		}
 	}
 
 	return result, nil
@@ -248,6 +289,9 @@ func (a *Analyzer) AnalyzeDir(dir string, force bool) error {
 		if analysis.Waveform != nil {
 			fmt.Printf("  Waveform: %d samples at %d px/sec\n",
 				len(analysis.Waveform.Peaks), analysis.Waveform.PixelsPerSec)
+		}
+		if len(analysis.CuePoints) > 0 {
+			fmt.Printf("  Cue points: %d detected\n", len(analysis.CuePoints))
 		}
 
 		return nil
